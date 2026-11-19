@@ -163,3 +163,60 @@ def test_refresh_and_manual_pick(win, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([str(other)], ""))
     w.pick_files()
     assert names(w) == ["TWK-001.png", "TWK-002.png"]
+
+
+def test_full_screen_crop_and_parts(win, monkeypatch):
+    """Alur v1.0.1: Win+PrtScn layar penuh -> dipotong -> pembahasan panjang disambung."""
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QDialog
+
+    from screenshot_manager import app as appmod
+    from tests.test_parts import AREA, long_page, screen_of
+
+    w, shots = win, win._shots
+
+    # 1) atur area dari screenshot acuan (tidak masuk daftar)
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    w.waiting_crop_reference = True
+
+    def fake_exec(dlg):
+        dlg.canvas.sel = QRect(*AREA)
+        return QDialog.Accepted
+    monkeypatch.setattr(appmod.CropDialog, "exec", fake_exec)
+    screen_of(long_page(seed=3), 0).save(shots / "acuan.png")
+    assert wait_until(lambda: w.settings["crop"].get("rect") == AREA)
+    assert w.chk_crop.isChecked() and len(w.pkg.items) == 0
+
+    # 2) soal TWK-001: layar penuh -> dipotong
+    page = long_page(1500, seed=4)
+    w.select_category("TWK")
+    w.set_number(1)
+    w.arm()
+    screen_of(page, 0).save(shots / "p1.png")
+    assert wait_until(lambda: len(w.pkg.items) == 1)
+    item = w.pkg.items[0]
+    assert (item.width, item.height) == (AREA[2], AREA[3]) and "(dipotong)" in w.banner.text()
+    assert w.lbl_target.text() == "TWK-002.png"
+
+    # 3) scroll + Tambah Bagian Lanjutan dua kali
+    for n, scroll in enumerate([550, 900], start=2):
+        w.append_next()
+        assert w.lbl_target.text() == f"TWK-001.png + bagian {n}"
+        screen_of(page, scroll).save(shots / f"p{n}.png")
+        assert wait_until(lambda n=n: item.parts == n)
+        assert f"BAGIAN {n} DISAMBUNG" in w.banner.text()
+    assert item.height == 1500 and len(w.pkg.items) == 1
+    assert w.armed and w.lbl_target.text() == "TWK-002.png"     # kembali ke soal berikutnya
+
+    # 4) lupa scroll -> ditolak, mode lanjutan tetap aktif
+    w.append_next()
+    screen_of(page, 900).save(shots / "p3-lagi.png")
+    assert wait_until(lambda: "sama persis" in w.banner.text())
+    assert w.append_target == item.id
+    w.disarm_clicked()
+
+    # 5) hapus bagian terakhir dari tabel
+    w.refresh_table(select_id=item.id)
+    assert w.table.item(0, 4).text() == "3"
+    w.remove_last_part()
+    assert item.parts == 2 and w.table.item(0, 4).text() == "2"

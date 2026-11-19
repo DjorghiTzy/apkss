@@ -10,14 +10,14 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader,
+from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPen,
                            QKeySequence, QPixmap)
 from PySide6.QtWidgets import (QProgressDialog, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
                                QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
                                QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-                               QMessageBox, QPushButton, QRadioButton, QSizePolicy, QSpinBox,
+                               QMessageBox, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox,
                                QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
                                QCheckBox)
 
@@ -62,7 +62,8 @@ class Settings:
     def __init__(self):
         self.path = config_dir() / "settings.json"
         self.data = {"watch_folder": default_watch_folder(), "workspace": default_workspace(),
-                     "package": "Paket-01", "always_on_top": False, "zip_dir": ""}
+                     "package": "Paket-01", "always_on_top": False, "zip_dir": "",
+                     "crop": {"enabled": False, "rect": None, "screen": None}}
         try:
             self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
@@ -137,6 +138,98 @@ BANNER_STYLES = {
 }
 
 
+class CropCanvas(QWidget):
+    """Menampilkan screenshot acuan; seret mouse untuk memilih area soal."""
+    MAX = QSize(1100, 640)
+
+    def __init__(self, pixmap: QPixmap, rect: QRect | None = None):
+        super().__init__()
+        self.src = pixmap
+        self.view = pixmap.scaled(self.MAX, Qt.KeepAspectRatio, Qt.SmoothTransformation) \
+            if pixmap.width() > self.MAX.width() or pixmap.height() > self.MAX.height() else pixmap
+        self.k = pixmap.width() / max(1, self.view.width())
+        self.sel = rect if rect is not None else QRect()
+        self._start: QPoint | None = None
+        self.setFixedSize(self.view.size())
+        self.setCursor(Qt.CrossCursor)
+        self.on_change = lambda: None
+
+    def _img_point(self, p: QPoint) -> QPoint:
+        x = min(max(p.x(), 0), self.view.width())
+        y = min(max(p.y(), 0), self.view.height())
+        return QPoint(round(x * self.k), round(y * self.k))
+
+    def mousePressEvent(self, e):
+        self._start = self._img_point(e.position().toPoint())
+        self.sel = QRect(self._start, self._start)
+        self.update()
+
+    def mouseMoveEvent(self, e):
+        if self._start is not None:
+            self.sel = QRect(self._start, self._img_point(e.position().toPoint())).normalized()
+            self.update()
+            self.on_change()
+
+    def mouseReleaseEvent(self, e):
+        self.mouseMoveEvent(e)
+        self._start = None
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.drawPixmap(0, 0, self.view)
+        if self.sel.width() > 2 and self.sel.height() > 2:
+            r = QRect(round(self.sel.x() / self.k), round(self.sel.y() / self.k),
+                      round(self.sel.width() / self.k), round(self.sel.height() / self.k))
+            shade = QColor(0, 0, 0, 120)
+            full = self.rect()
+            p.fillRect(QRect(0, 0, full.width(), r.top()), shade)
+            p.fillRect(QRect(0, r.bottom() + 1, full.width(), full.height() - r.bottom()), shade)
+            p.fillRect(QRect(0, r.top(), r.left(), r.height()), shade)
+            p.fillRect(QRect(r.right() + 1, r.top(), full.width() - r.right(), r.height()), shade)
+            p.setPen(QPen(QColor("#ffd23f"), 3))
+            p.drawRect(r)
+
+
+class CropDialog(QDialog):
+    def __init__(self, parent, image_path: str, current: dict | None):
+        super().__init__(parent)
+        self.setWindowTitle("Atur Area Potong")
+        pm = QPixmap(image_path)
+        rect = None
+        if current and current.get("rect") and current.get("screen") == [pm.width(), pm.height()]:
+            rect = QRect(*current["rect"])
+        self.canvas = CropCanvas(pm, rect)
+        self.info = QLabel()
+        self.canvas.on_change = self._upd
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("<b>Seret kotak</b> menutupi area konten soal di browser (soal, pilihan, "
+                             "jawaban & pembahasan). Jangan sertakan tab browser dan taskbar."))
+        lay.addWidget(self.canvas, 0, Qt.AlignCenter)
+        lay.addWidget(self.info)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.screen = [pm.width(), pm.height()]
+        self._upd()
+
+    def _upd(self):
+        r = self.canvas.sel
+        self.info.setText(f"Layar acuan: {self.screen[0]}×{self.screen[1]} px   •   Area: "
+                          + (f"x={r.x()}, y={r.y()}, {r.width()}×{r.height()} px"
+                             if r.width() > 10 else "belum dipilih"))
+
+    def _accept(self):
+        if self.canvas.sel.width() < 50 or self.canvas.sel.height() < 50:
+            QMessageBox.warning(self, "Area terlalu kecil", "Seret kotak yang lebih besar.")
+            return
+        self.accept()
+
+    def result_crop(self) -> dict:
+        r = self.canvas.sel
+        return {"enabled": True, "rect": [r.x(), r.y(), r.width(), r.height()], "screen": self.screen}
+
+
 class UpdateWorker(QObject):
     """Menjalankan cek/unduh update di thread terpisah agar UI tidak macet."""
     checked = Signal(object, bool)      # ReleaseInfo, silent
@@ -184,6 +277,9 @@ class MainWindow(QMainWindow):
         self.pkg: Package | None = None
         self.armed = False
         self.redo_restore: tuple[str, int] | None = None   # (kategori, nomor) setelah "Ulangi Nomor"
+        self.append_target: str | None = None              # id item untuk "Tambah Bagian"
+        self.append_prev_armed = False
+        self.waiting_crop_reference = False
         self.last_item_id: str | None = None
         self._thumbs: dict[str, QPixmap] = {}
         self._loading = False
@@ -201,6 +297,7 @@ class MainWindow(QMainWindow):
 
         self._open_package(self.settings["package"] or "Paket-01")
         self.chk_top.setChecked(bool(self.settings["always_on_top"]))
+        self._refresh_crop_label()
         self.start_watching(self.settings["watch_folder"])
         self.set_banner("Siap. Atur paket, kategori, dan nomor lalu klik “Siapkan Screenshot Berikutnya”.",
                         "info")
@@ -260,7 +357,13 @@ class MainWindow(QMainWindow):
 
         split = QSplitter(Qt.Horizontal)
         outer.addWidget(split, 1)
-        split.addWidget(self._build_capture_panel())
+        cap = QScrollArea()
+        cap.setWidget(self._build_capture_panel())
+        cap.setWidgetResizable(True)
+        cap.setFrameShape(QFrame.NoFrame)
+        cap.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        cap.setMinimumWidth(320)
+        split.addWidget(cap)
         split.addWidget(self._build_list_panel())
         split.addWidget(self._build_preview_panel())
         split.setStretchFactor(0, 0)
@@ -331,6 +434,7 @@ class MainWindow(QMainWindow):
         hm.addWidget(self.rb_auto)
         hm.addWidget(self.rb_manual)
         vn.addLayout(hm)
+        g_num.setMinimumHeight(110)
         lay.addWidget(g_num)
 
         self.lbl_target = QLabel()
@@ -350,6 +454,15 @@ class MainWindow(QMainWindow):
         self.btn_arm.setShortcut(QKeySequence("Ctrl+Return"))
         self.btn_arm.clicked.connect(self.arm)
         lay.addWidget(self.btn_arm)
+        self.btn_append = QPushButton("+ Tambah Bagian Lanjutan")
+        self.btn_append.setToolTip("Screenshot berikutnya DISAMBUNG ke bawah gambar terakhir "
+                                   "(untuk soal/pembahasan yang perlu di-scroll)")
+        self.btn_append.setMinimumHeight(40)
+        self.btn_append.setStyleSheet("font-size:14px; font-weight:bold; background:#d9822b; color:white;"
+                                      "border-radius:6px;")
+        self.btn_append.setShortcut(QKeySequence("Ctrl+B"))
+        self.btn_append.clicked.connect(self.append_next)
+        lay.addWidget(self.btn_append)
         grid = QGridLayout()
         btn_cancel = QPushButton("Batalkan")
         btn_cancel.setShortcut(QKeySequence("Esc"))
@@ -368,6 +481,22 @@ class MainWindow(QMainWindow):
         grid.addWidget(btn_change, 1, 0)
         grid.addWidget(btn_addcat, 1, 1)
         lay.addLayout(grid)
+
+        g_crop = QGroupBox("Potong otomatis (screenshot layar penuh Win+PrtScn)")
+        vc = QVBoxLayout(g_crop)
+        hc = QHBoxLayout()
+        self.chk_crop = QCheckBox("Aktif")
+        self.chk_crop.toggled.connect(self._on_crop_toggled)
+        btn_crop = QPushButton("Atur Area…")
+        btn_crop.clicked.connect(self.setup_crop)
+        hc.addWidget(self.chk_crop)
+        hc.addWidget(btn_crop, 1)
+        vc.addLayout(hc)
+        self.lbl_crop = QLabel()
+        self.lbl_crop.setWordWrap(True)
+        self.lbl_crop.setStyleSheet("font-size:11px; color:#555")
+        vc.addWidget(self.lbl_crop)
+        lay.addWidget(g_crop)
         lay.addStretch(1)
         return panel
 
@@ -378,8 +507,8 @@ class MainWindow(QMainWindow):
         self.lbl_list = QLabel("Screenshot diterima")
         self.lbl_list.setStyleSheet("font-weight:bold")
         lay.addWidget(self.lbl_list)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Preview", "Kategori", "Nomor", "Nama File",
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["Preview", "Kategori", "Nomor", "Nama File", "Bagian",
                                               "File Asli", "Diterima"])
         self.table.setIconSize(THUMB)
         self.table.verticalHeader().setDefaultSectionSize(THUMB.height() + 8)
@@ -389,7 +518,7 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(4, QHeaderView.Stretch)
+        hh.setSectionResizeMode(5, QHeaderView.Stretch)
         hh.setSectionResizeMode(0, QHeaderView.Fixed)
         self.table.setColumnWidth(0, THUMB.width() + 12)
         self.table.itemSelectionChanged.connect(self._update_preview)
@@ -404,9 +533,12 @@ class MainWindow(QMainWindow):
         b_del.clicked.connect(self.delete_selected)
         b_ren = QPushButton("Ulangi Penamaan (1..n)")
         b_ren.clicked.connect(self.renumber)
+        b_part = QPushButton("Hapus Bagian Terakhir")
+        b_part.setToolTip("Lepas sambungan terakhir dari gambar terpilih")
+        b_part.clicked.connect(self.remove_last_part)
         b_ws = QPushButton("Buka Workspace")
         b_ws.clicked.connect(lambda: self.open_path(self.pkg.root))
-        for b in (b_edit, b_del, b_ren, b_ws):
+        for b in (b_edit, b_del, b_ren, b_part, b_ws):
             row.addWidget(b)
         lay.addLayout(row)
         return panel
@@ -586,7 +718,20 @@ class MainWindow(QMainWindow):
         occupant = self.pkg.find_slot(cat, num)
         self.lbl_target.setText(fname)
         mode = "otomatis" if self.pkg.capture.auto_number else "manual"
-        if self.armed:
+        if self.append_target:
+            try:
+                it = self.pkg.get(self.append_target)
+            except ManagerError:
+                self.append_target = None
+                return self._update_capture_labels()
+            self.lbl_target.setText(f"{it.filename} + bagian {it.parts + 1}")
+            self.lbl_state.setText("● SIAP: BAGIAN LANJUTAN<br><span style='font-size:12px'>Screenshot "
+                                   f"berikutnya disambung ke bawah {it.filename}</span>")
+            self.lbl_state.setStyleSheet("background:#d9822b; color:white; font-size:18px;"
+                                         "font-weight:bold; border-radius:6px; padding:4px")
+            self.lbl_target.setStyleSheet("font-size:22px; font-weight:bold; padding:6px; color:#a35400")
+            self.setWindowTitle(f"{APP_NAME} — SIAP: BAGIAN {it.parts + 1} {it.filename} [{self.pkg.name}]")
+        elif self.armed:
             extra = ""
             if self.redo_restore:
                 extra = "<br>(ULANGI: menggantikan versi sebelumnya)"
@@ -618,8 +763,9 @@ class MainWindow(QMainWindow):
         self.log_event(f"Siap menerima: {fname}")
 
     def disarm(self, silent=False):
-        was = self.armed
+        was = self.armed or self.append_target is not None
         self.armed = False
+        self.append_target = None
         if self.redo_restore:
             cat, num = self.redo_restore
             self.redo_restore = None
@@ -646,6 +792,9 @@ class MainWindow(QMainWindow):
             item = sel[0] if sel and sel[0].assigned else None
         if item is None:
             return self.error("Belum ada screenshot terakhir untuk diulang. Pilih baris di daftar.")
+        if self.append_target:
+            self.append_target = None
+            self.armed = self.append_prev_armed
         if not self.redo_restore:
             self.redo_restore = self.target()
         self.select_category(item.category)
@@ -661,12 +810,19 @@ class MainWindow(QMainWindow):
         if self.pkg is None:
             return
         name = Path(path).name
+        if self.waiting_crop_reference:
+            self.waiting_crop_reference = False
+            self._open_crop_dialog(path)
+            return
+        if self.append_target:
+            return self._handle_append(path, name, origin)
+        crop = self.settings["crop"]
         try:
             if self.armed:
                 cat, num = self.target()
-                res = self.pkg.add_image(path, cat, num)
+                res = self.pkg.add_image(path, cat, num, crop=crop)
             else:
-                res = self.pkg.add_image(path)
+                res = self.pkg.add_image(path, crop=crop)
         except DuplicateImageError as exc:
             self.set_banner(f"✖ DUPLIKAT — {name} sama dengan {exc.existing.display_name}. "
                             "Tidak disimpan.", "err")
@@ -679,7 +835,7 @@ class MainWindow(QMainWindow):
         self.last_item_id = item.id
         if item.assigned:
             replaced = f" (menggantikan versi lama)" if res.replaced else ""
-            msg = f"✔ DITERIMA: {item.filename}{replaced}  ←  {name}"
+            msg = f"✔ DITERIMA: {item.filename}{replaced}{' (dipotong)' if res.cropped else ''}  ←  {name}"
             if self.redo_restore:
                 cat, num = self.redo_restore
                 self.redo_restore = None
@@ -702,6 +858,116 @@ class MainWindow(QMainWindow):
             self.log_event(f"Masuk tanpa metadata: {name} [{origin}]", "warn")
         self._update_capture_labels()
         self.refresh_table(select_id=item.id)
+
+    # ============================================================ bagian lanjutan
+    def append_next(self):
+        item = None
+        sel = self.selected_items()
+        if self.last_item_id:
+            try:
+                item = self.pkg.get(self.last_item_id)
+            except ManagerError:
+                item = None
+        if item is None and sel:
+            item = sel[0]
+        if item is None:
+            return self.error("Belum ada gambar untuk disambung. Ambil screenshot bagian pertama dulu.")
+        if self.append_target is None:
+            self.append_prev_armed = self.armed
+        self.append_target = item.id
+        self._update_capture_labels()
+        self.set_banner(f"SIAP BAGIAN LANJUTAN — screenshot berikutnya disambung ke bawah {item.filename} "
+                        f"(bagian {item.parts + 1})", "info")
+        self.log_event(f"Siap bagian lanjutan untuk {item.filename}")
+
+    def _handle_append(self, path: str, name: str, origin: str):
+        try:
+            res = self.pkg.append_part(self.append_target, path, crop=self.settings["crop"])
+        except DuplicateImageError as exc:
+            self.set_banner(f"✖ DUPLIKAT — {name} sama dengan {exc.existing.display_name}. Tidak disambung. "
+                            "Scroll halaman lalu ambil lagi.", "err")
+            self.log_event(f"Bagian duplikat diabaikan: {name}", "err")
+            return
+        except (ManagerError, OSError) as exc:
+            return self.error(f"Gagal menyambung {name}: {exc}. Scroll halaman lalu ambil lagi.")
+        item = res.item
+        self.append_target = None
+        self.armed = self.append_prev_armed
+        self.last_item_id = item.id
+        self._thumbs.clear()
+        ov = f", tumpang tindih {res.overlap_rows}px dibuang" if res.overlap_rows else ""
+        nxt = (f"   •   Berikutnya: {make_filename(*self.target())}" if self.armed
+               else "   •   Atur nomor lalu klik “Siapkan” lagi")
+        self.set_banner(f"✔ BAGIAN {res.part_number} DISAMBUNG ke {item.filename} "
+                        f"({item.width}×{item.height}px{ov}){nxt}", "ok")
+        self.log_event(f"Bagian {res.part_number} disambung ke {item.filename} dari {name} [{origin}]", "ok")
+        self._update_capture_labels()
+        self.refresh_table(select_id=item.id)
+
+    def remove_last_part(self):
+        sel = self.selected_items()
+        if not sel:
+            return self.error("Pilih gambar di daftar terlebih dahulu")
+        try:
+            item = self.pkg.remove_last_part(sel[0].id)
+        except (ManagerError, OSError) as exc:
+            return self.error(str(exc))
+        self._thumbs.clear()
+        self.log_event(f"Bagian terakhir dilepas dari {item.display_name} (sisa {item.parts})", "warn")
+        self.set_banner(f"Bagian terakhir dilepas dari {item.display_name} — sisa {item.parts} bagian", "warn")
+        self.refresh_table(select_id=item.id)
+
+    # ============================================================ crop
+    def _refresh_crop_label(self):
+        c = self.settings["crop"] or {}
+        has = bool(c.get("rect") and c.get("screen"))
+        self.chk_crop.blockSignals(True)
+        self.chk_crop.setChecked(bool(c.get("enabled")) and has)
+        self.chk_crop.setEnabled(has)
+        self.chk_crop.blockSignals(False)
+        if has:
+            x, y, w, h = c["rect"]
+            self.lbl_crop.setText(f"Area {w}×{h}px di ({x},{y}) untuk layar {c['screen'][0]}×{c['screen'][1]}. "
+                                  "Screenshot berukuran lain tidak dipotong.")
+        else:
+            self.lbl_crop.setText("Belum diatur. Klik “Atur Area…”.")
+
+    def _on_crop_toggled(self, on: bool):
+        c = dict(self.settings["crop"] or {})
+        c["enabled"] = on
+        self.settings["crop"] = c
+        self.log_event("Potong otomatis " + ("aktif" if on else "nonaktif"))
+
+    def setup_crop(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("Atur Area Potong")
+        box.setText("Butuh satu screenshot layar penuh sebagai acuan.\n\n"
+                    "Klik “Tunggu Screenshot”, buka halaman soal di browser, lalu tekan Win+PrtScn. "
+                    "Screenshot acuan itu tidak dimasukkan ke daftar.")
+        b_wait = box.addButton("Tunggu Screenshot", QMessageBox.AcceptRole)
+        b_file = box.addButton("Pilih File…", QMessageBox.ActionRole)
+        box.addButton("Batal", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is b_wait:
+            self.waiting_crop_reference = True
+            self.set_banner("Menunggu screenshot acuan — tekan Win+PrtScn di halaman soal.", "info")
+        elif box.clickedButton() is b_file:
+            exts = " ".join(f"*{e}" for e in sorted(IMAGE_EXTS))
+            f, _ = QFileDialog.getOpenFileName(self, "Pilih screenshot layar penuh", self.ed_folder.text(),
+                                               f"Gambar ({exts})")
+            if f:
+                self._open_crop_dialog(f)
+
+    def _open_crop_dialog(self, path: str):
+        dlg = CropDialog(self, path, self.settings["crop"])
+        if dlg.exec() == QDialog.Accepted:
+            self.settings["crop"] = dlg.result_crop()
+            self._refresh_crop_label()
+            x, y, w, h = self.settings["crop"]["rect"]
+            self.set_banner(f"✔ Area potong disimpan: {w}×{h}px. Potong otomatis AKTIF.", "ok")
+            self.log_event(f"Area potong: {self.settings['crop']}", "ok")
+        else:
+            self.set_banner("Pengaturan area potong dibatalkan.", "warn")
 
     # ============================================================ sources
     def _on_watch_status(self, active: bool, msg: str):
@@ -798,9 +1064,10 @@ class MainWindow(QMainWindow):
             cells = [c0, QTableWidgetItem(it.category or "—"),
                      QTableWidgetItem(str(it.number) if it.number else "—"),
                      QTableWidgetItem(it.display_name),
+                     QTableWidgetItem(str(it.parts)),
                      QTableWidgetItem(Path(it.source).name),
                      QTableWidgetItem(it.received_at.replace("T", " "))]
-            cells[4].setToolTip(it.source)
+            cells[5].setToolTip(it.source)
             f = QFont()
             f.setBold(True)
             cells[3].setFont(f)

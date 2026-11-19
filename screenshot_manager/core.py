@@ -31,6 +31,8 @@ DEFAULT_CATEGORIES = ["TWK", "TIU", "TKP"]
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 UNASSIGNED_DIR = "_belum"
 REPLACED_DIR = "_diganti"
+PARTS_DIR = "_bagian"
+MIN_OVERLAP_ROWS = 12
 STATE_FILE = "paket.json"
 STATE_VERSION = 1
 
@@ -139,6 +141,71 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+# ---------------------------------------------------------------- crop & stitch
+
+def apply_crop(img: Image.Image, crop: Optional[dict]) -> tuple[Image.Image, bool]:
+    """Potong gambar ke area yang diatur pengguna.
+
+    crop = {"enabled": bool, "rect": [x, y, w, h], "screen": [W, H]}.
+    Hanya diterapkan pada gambar seukuran layar referensi (screenshot layar penuh);
+    potongan manual dari Snipping Tool dibiarkan apa adanya.
+    """
+    if not crop or not crop.get("enabled") or not crop.get("rect") or not crop.get("screen"):
+        return img, False
+    sw, sh = crop["screen"]
+    if (img.width, img.height) != (int(sw), int(sh)):
+        return img, False
+    x, y, w, h = (int(v) for v in crop["rect"])
+    x, y = max(0, x), max(0, y)
+    w, h = min(w, img.width - x), min(h, img.height - y)
+    if w < 10 or h < 10:
+        return img, False
+    return img.crop((x, y, x + w, y + h)), True
+
+
+def _row_hashes(img: Image.Image) -> list[int]:
+    rgb = img.convert("RGB")
+    stride = rgb.width * 3
+    data = rgb.tobytes()
+    return [hash(data[i * stride:(i + 1) * stride]) for i in range(rgb.height)]
+
+
+def find_overlap(top: Image.Image, bottom: Image.Image, min_rows: int = MIN_OVERLAP_ROWS) -> int:
+    """Jumlah baris di bawah `top` yang identik dengan baris teratas `bottom`
+    (terjadi saat halaman di-scroll kurang dari satu layar). 0 jika tidak ada."""
+    if top.width != bottom.width:
+        return 0
+    ra, rb = _row_hashes(top), _row_hashes(bottom)
+    for k in range(min(len(ra), len(rb)) - 1, min_rows - 1, -1):
+        if ra[-k] == rb[0] and ra[-1] == rb[k - 1] and ra[-k:] == rb[:k]:
+            return k
+    return 0
+
+
+def stitch(parts: list[Image.Image]) -> tuple[Image.Image, list[int]]:
+    """Sambung gambar dari atas ke bawah, membuang baris tumpang tindih akibat scroll."""
+    if not parts:
+        raise ManagerError("Tidak ada bagian untuk disambung")
+    overlaps = [0]
+    crops = [parts[0]]
+    for prev, cur in zip(parts, parts[1:]):
+        k = find_overlap(prev, cur)
+        overlaps.append(k)
+        crops.append(cur.crop((0, k, cur.width, cur.height)) if k else cur)
+    width = max(c.width for c in crops)
+    height = sum(c.height for c in crops)
+    out = Image.new("RGB", (width, height), "white")
+    y = 0
+    for c in crops:
+        if c.mode in ("RGBA", "LA", "P"):
+            c = c.convert("RGBA")
+            out.paste(c, (0, y), c)
+        else:
+            out.paste(c.convert("RGB"), (0, y))
+        y += c.height
+    return out, overlaps
+
+
 # ---------------------------------------------------------------- model
 
 @dataclass
@@ -151,6 +218,8 @@ class Item:
     number: Optional[int] = None
     width: int = 0
     height: int = 0
+    parts: int = 1
+    part_fps: list = field(default_factory=list)
 
     @property
     def assigned(self) -> bool:
@@ -173,6 +242,15 @@ class Item:
 class AddResult:
     item: Item
     replaced: Optional[Item] = None
+    cropped: bool = False
+
+
+@dataclass
+class AppendResult:
+    item: Item
+    part_number: int
+    overlap_rows: int
+    cropped: bool = False
 
 
 @dataclass
@@ -252,7 +330,7 @@ class Package:
         raise ManagerError("Item tidak ditemukan")
 
     def find_by_fingerprint(self, fp: str) -> Optional[Item]:
-        return next((i for i in self.items if i.fingerprint == fp), None)
+        return next((i for i in self.items if i.fingerprint == fp or fp in i.part_fps), None)
 
     def find_slot(self, category: str, number: int) -> Optional[Item]:
         return next((i for i in self.items if i.category == category and i.number == number), None)
@@ -302,6 +380,9 @@ class Package:
             if int(number) < 1:
                 raise ManagerError("Nomor harus >= 1")
 
+    def parts_dir(self, item: Item) -> Path:
+        return self.root / PARTS_DIR / item.id
+
     def _backup_replaced(self, item: Item) -> None:
         src = self.path_of(item)
         if src.exists():
@@ -309,16 +390,17 @@ class Package:
             dest_dir.mkdir(exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             os.replace(src, dest_dir / f"{Path(item.filename).stem}_{stamp}_{item.id[:6]}.png")
+        shutil.rmtree(self.parts_dir(item), ignore_errors=True)
 
     def add_image(self, source: str | os.PathLike, category: Optional[str] = None,
-                  number: Optional[int] = None) -> AddResult:
+                  number: Optional[int] = None, crop: Optional[dict] = None) -> AddResult:
         """Salin screenshot ke workspace (sebagai PNG) dengan metadata yang diberikan.
 
         - Duplikat (piksel identik) -> DuplicateImageError, tidak ada yang berubah.
         - Slot kategori+nomor sudah terisi -> salinan lama diganti (dicadangkan ke _diganti/).
         """
         self._check_target(category, number)
-        img = load_image(source)
+        img, cropped = apply_crop(load_image(source), crop)
         fp = image_fingerprint(img)
         dup = self.find_by_fingerprint(fp)
         if dup is not None:
@@ -327,7 +409,7 @@ class Package:
         item = Item(id=uuid.uuid4().hex, fingerprint=fp, source=str(Path(source).resolve()),
                     received_at=_now(), category=category,
                     number=int(number) if number is not None else None,
-                    width=img.width, height=img.height)
+                    width=img.width, height=img.height, part_fps=[fp])
         replaced = self.find_slot(category, item.number) if item.assigned else None
         _save_png_atomic(img, self.root / (item.relpath + ".new"))  # tulis dulu, baru ganti
         if replaced is not None:
@@ -336,7 +418,67 @@ class Package:
         os.replace(self.root / (item.relpath + ".new"), self.path_of(item))
         self.items.append(item)
         self.save()
-        return AddResult(item, replaced)
+        return AddResult(item, replaced, cropped)
+
+    # ---------- bagian lanjutan (soal + pembahasan yang panjang)
+    def _part_files(self, item: Item) -> list[Path]:
+        d = self.parts_dir(item)
+        return sorted(d.glob("[0-9][0-9][0-9].png")) if d.is_dir() else []
+
+    def _rebuild(self, item: Item, files: list[Path]) -> list[int]:
+        images = [load_image(f) for f in files]
+        img, overlaps = stitch(images)
+        _save_png_atomic(img, self.path_of(item))
+        item.width, item.height = img.width, img.height
+        item.fingerprint = image_fingerprint(img)
+        item.parts = len(files)
+        return overlaps
+
+    def append_part(self, item_id: str, source: str | os.PathLike,
+                    crop: Optional[dict] = None) -> AppendResult:
+        """Sambungkan screenshot baru ke bawah gambar item (mis. lanjutan pembahasan)."""
+        item = self.get(item_id)
+        img, cropped = apply_crop(load_image(source), crop)
+        fp = image_fingerprint(img)
+        if not item.part_fps:
+            item.part_fps = [item.fingerprint]
+        if fp in item.part_fps:
+            raise ManagerError(f"Bagian ini sama persis dengan bagian {item.display_name} sebelumnya "
+                               "(halaman belum di-scroll?)")
+        dup = self.find_by_fingerprint(fp)
+        if dup is not None:
+            raise DuplicateImageError(dup)
+        files = self._part_files(item)
+        d = self.parts_dir(item)
+        d.mkdir(parents=True, exist_ok=True)
+        if not files:  # bagian pertama = gambar saat ini
+            first = d / "001.png"
+            shutil.copy2(self.path_of(item), first)
+            files = [first]
+        new = d / f"{len(files) + 1:03d}.png"
+        _save_png_atomic(img, new)
+        try:
+            overlaps = self._rebuild(item, files + [new])
+        except BaseException:
+            new.unlink(missing_ok=True)
+            raise
+        item.part_fps.append(fp)
+        self.save()
+        return AppendResult(item, item.parts, overlaps[-1], cropped)
+
+    def remove_last_part(self, item_id: str) -> Item:
+        item = self.get(item_id)
+        files = self._part_files(item)
+        if len(files) < 2:
+            raise ManagerError(f"{item.display_name} hanya punya satu bagian")
+        files[-1].unlink()
+        self._rebuild(item, files[:-1])
+        if len(item.part_fps) > 1:
+            item.part_fps.pop()
+        if item.parts == 1:
+            shutil.rmtree(self.parts_dir(item), ignore_errors=True)
+        self.save()
+        return item
 
     def assign(self, item_id: str, category: Optional[str], number: Optional[int],
                on_conflict: str = "error") -> Optional[Item]:
@@ -389,6 +531,7 @@ class Package:
         """Hapus item dari daftar (dan salinan workspace). File asli tidak disentuh."""
         item = self.get(item_id)
         self.path_of(item).unlink(missing_ok=True)
+        shutil.rmtree(self.parts_dir(item), ignore_errors=True)
         self.items.remove(item)
         self.save()
         return item

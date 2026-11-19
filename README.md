@@ -35,30 +35,44 @@ Tidak butuh hak admin; terpasang di `%LOCALAPPDATA%\Programs\ScreenshotManager`.
 
 Judul jendela juga menunjukkan status, mis. `Screenshot Manager — SIAP: TWK-005.png [Paket-01]`.
 
-## Alur kerja Claude
+## Alur kerja Claude (soal + pembahasan lengkap)
 
-1. Pilih **Paket** (atau **Paket Baru…**, mis. `Paket-01`).
-2. Klik kategori soal yang terlihat di website (**TWK / TIU / TKP**).
-3. Isi **Nomor soal berikutnya** sesuai nomor di navigasi website (atau **Ubah Nomor…**).
-4. Klik **Siapkan Screenshot Berikutnya** (Ctrl+Enter). Status menjadi **● SIAP MENERIMA** dan
-   nama target tampil, mis. `TWK-001.png`.
-5. Ambil screenshot dengan Snipping Tool. Snipping Tool Windows 11 menyimpan otomatis ke
-   `Pictures\Screenshots`; jika tidak, simpan manual ke folder itu.
-6. Banner hijau muncul: `✔ DITERIMA: TWK-001.png • Berikutnya: TWK-002.png`.
-7. Mode **Otomatis**: nomor naik +1 dan tetap SIAP, jadi langsung ambil screenshot soal berikutnya.
-   Mode **Manual**: setelah diterima status kembali BELUM SIAP; atur nomor, lalu Siapkan lagi.
-8. Pindah kategori? Klik tombol kategorinya. Nomor berikutnya diingat per kategori.
+**Sekali di awal: atur area potong**
+1. Buka halaman soal (mode pembahasan) di browser.
+2. Di Screenshot Manager: **Atur Area…** → **Tunggu Screenshot** → tekan **Win+PrtScn**.
+   Screenshot acuan ini tidak masuk daftar.
+3. Seret kotak menutupi area konten soal (soal, pilihan, jawaban, pembahasan); jangan sertakan tab
+   browser dan taskbar → OK. **Potong otomatis** menjadi aktif.
+
+Tip: perkecil zoom browser (Ctrl+−, mis. 67%) agar soal + pembahasan muat dalam satu layar.
+
+**Untuk setiap soal**
+1. Klik nomor soal di navigasi website, baca kategorinya.
+2. Di Screenshot Manager: klik kategori (TWK/TIU/TKP), isi **Nomor soal berikutnya**, klik
+   **Siapkan Screenshot Berikutnya** (Ctrl+Enter) → status **● SIAP MENERIMA**.
+   Pada mode **Otomatis** langkah ini cukup sekali; nomor naik sendiri setelah tiap soal.
+3. Tekan **Win+PrtScn** (Windows menyimpan layar penuh ke `Pictures\Screenshots`), lalu aplikasi
+   memotong ke area soal → banner hijau `✔ DITERIMA: TWK-001.png (dipotong)`.
+4. Pembahasan belum terlihat semua? Scroll halaman ke bawah, klik **+ Tambah Bagian Lanjutan**
+   (Ctrl+B), tekan **Win+PrtScn** lagi → `✔ BAGIAN 2 DISAMBUNG ke TWK-001.png`. Bagian yang
+   tumpang tindih karena scroll dibuang otomatis. Ulangi sampai pembahasan habis.
+5. Lanjut ke soal berikutnya.
+
+Snipping Tool (Win+Shift+S) tetap bisa dipakai: potongan manual yang ukurannya bukan layar penuh
+tidak dipotong lagi.
 
 Tombol lain:
-- **Batalkan** (Esc): batalkan persiapan; screenshot berikutnya masuk *tanpa nomor*.
+- **Batalkan** (Esc): batalkan persiapan / bagian lanjutan; screenshot berikutnya masuk *tanpa nomor*.
 - **Ulangi Nomor**: screenshot berikutnya **menggantikan** screenshot terakhir (atau baris terpilih),
   lalu target kembali ke posisi sebelumnya.
 - **Ubah Nomor…**: lompat ke nomor mana pun; nomor tidak harus berurutan.
+- **Hapus Bagian Terakhir**: lepas sambungan terakhir dari gambar terpilih.
 
 Aturan penting:
 - Screenshot yang masuk saat **BELUM SIAP** tetap ditampilkan (baris kuning, "belum diberi nomor").
   Klik dua kali barisnya untuk menetapkan kategori/nomor.
-- Gambar dengan piksel identik dengan yang sudah ada ditolak sebagai **DUPLIKAT**.
+- Gambar dengan piksel identik dengan yang sudah ada ditolak sebagai **DUPLIKAT**. Bagian lanjutan
+  yang sama persis (lupa scroll) juga ditolak, dan mode lanjutan tetap aktif untuk dicoba lagi.
 - Jika nomor target sudah terisi, screenshot baru **mengganti** yang lama (status menampilkan
   peringatan ⚠ sebelumnya). Salinan lama dicadangkan di `_diganti\`.
 - Saat mengubah nomor di daftar ke nomor yang sudah dipakai, Anda memilih **Tukar** atau **Ganti**.
@@ -74,6 +88,7 @@ Aturan penting:
     TWK\TWK-001.png   salinan yang sudah dinamai
     TIU\TIU-001.png
     _belum\           screenshot tanpa nomor
+    _bagian\          potongan per bagian (untuk gambar bersambung)
     _diganti\         cadangan salinan yang tergantikan
   ```
 - Pengaturan & log: `%APPDATA%\ScreenshotManager\` (`settings.json`, `screenshot-manager.log`).
