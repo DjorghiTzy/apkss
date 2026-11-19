@@ -42,15 +42,21 @@ scroll ke bawah sambil memotret dan menyambung sampai pembahasan habis, lalu lan
 berikutnya. Kategori & nomor mengikuti rencana yang Anda isi (bukan OCR/AI). Aplikasi hanya
 menggerakkan mouse/keyboard seperti pengguna; tidak menyentuh login, cookie, atau data browser.
 
-1. Di browser: buka halaman **pembahasan** tryout, layar penuh, grid nomor soal terlihat.
+Alurnya mengikuti Privat Alfaiz: pilih **Tipe Soal** TWK → klik nomor 1…30 di **Daftar Soal** →
+pilih Tipe Soal TIU → 1…35 → pilih TKP → 1…45. **F10** = mulai / berhenti dari jendela mana pun.
+
+1. Di browser: buka halaman **pembahasan** tryout, layar penuh, seluruh Daftar Soal terlihat.
    Perkecil zoom (Ctrl+−) bila perlu.
 2. Screenshot Manager → **Atur Area…** → **Ambil Layar Acuan** → seret kotak menutupi area konten
    soal (tanpa grid nomor, tab browser, taskbar, dan header yang menempel saat di-scroll) → OK.
 3. **⚡ TANGKAP OTOMATIS…** → isi jumlah soal (TWK 30, TIU 35, TKP 45), pilih penomoran,
-   pilih cara pindah soal (disarankan: grid nomor soal) → **Tandai Posisi di Layar…** → klik
-   tombol nomor 1, nomor 2, dan nomor tepat di bawah nomor 1 → isi jumlah kolom grid.
-4. **MULAI TANGKAP OTOMATIS**. Jangan sentuh mouse/keyboard. Berhenti kapan saja dengan **ESC**
-   atau menggeser mouse ke **pojok kiri atas**. Perkiraan 6–12 detik per soal.
+   biarkan "Nomor mulai dari 1 di tiap Tipe Soal" tercentang → **Tandai Posisi di Layar…** → klik
+   tombol nomor 1, nomor 2, dan nomor 6 (tepat di bawah 1) → jumlah kolom 5 →
+   **Tandai Dropdown Tipe Soal…** → klik tombol dropdown (tertutup), lalu dalam 5 detik buka
+   dropdown di browser → klik pilihan TWK, TIU, TKP di gambar.
+4. **MULAI TANGKAP OTOMATIS** (atau tekan **F10**). Jangan sentuh mouse/keyboard. Berhenti
+   kapan saja dengan **F10**, **ESC**, atau mouse ke **pojok kiri atas**. Perkiraan 6–12 detik
+   per soal. F10 berikutnya melanjutkan soal yang belum ada.
 5. Setelah selesai, jendela muncul lagi dengan laporan; cek baris yang "perlu dicek", lalu
    **BUAT ZIP**.
 

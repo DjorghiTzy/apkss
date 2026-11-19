@@ -84,3 +84,49 @@ class FakeBrowser:
 
     def sleep(self, s):
         pass
+
+
+# ---------------------------------------------------------------- mirip Privat Alfaiz
+DROPDOWN = (1200, 110)                                   # tombol "Tipe Soal"
+OPTIONS = {"TWK": (1200, 160), "TIU": (1200, 220), "TKP": (1200, 280)}
+CAT_GRID = {"first": (1130, 200), "dx": 46, "dy": 42, "cols": 5}
+
+
+class FakeCategoryBrowser(FakeBrowser):
+    """Dropdown Tipe Soal + grid 'Daftar Soal' yang mulai dari 1 di tiap kategori."""
+
+    def __init__(self, counts, height_of=lambda cat, n: 700 + (n * 137) % 1300, start_cat="TWK", **kw):
+        offs = {"TWK": 0, "TIU": 100, "TKP": 200}
+        heights = {offs[c] + n: height_of(c, n) for c, cnt in counts.items() for n in range(1, cnt + 1)}
+        super().__init__(heights, **kw)
+        self.counts = counts
+        self.offs = offs
+        self.cat = start_cat
+        self.local = 1
+        self.q = offs[start_cat] + 1
+        self.open = False
+        self.cat_switches = []
+
+    def page_of(self, cat, n):
+        return self.pages[self.offs[cat] + n]
+
+    def click(self, x, y):
+        self.clicks.append((x, y))
+        if abs(x - DROPDOWN[0]) < 40 and abs(y - DROPDOWN[1]) < 15:
+            self.open = not self.open
+            return
+        if self.open:
+            for cat, (ox, oy) in OPTIONS.items():
+                if abs(x - ox) < 60 and abs(y - oy) < 20:
+                    self.cat, self.local, self.q, self.scroll_y = cat, 1, self.offs[cat] + 1, 0
+                    self.cat_switches.append(cat)
+            self.open = False             # klik di mana pun menutup dropdown
+            return
+        col = round((x - CAT_GRID["first"][0]) / CAT_GRID["dx"])
+        row = round((y - CAT_GRID["first"][1]) / CAT_GRID["dy"])
+        n = row * CAT_GRID["cols"] + col + 1
+        if 0 <= col < CAT_GRID["cols"] and 1 <= n <= self.counts[self.cat]:
+            self.local, self.q, self.scroll_y = n, self.offs[self.cat] + n, 0
+
+    def key(self, name):
+        pass

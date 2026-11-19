@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,12 +58,13 @@ class Plan:
     def total(self) -> int:
         return sum(int(n) for _, n in self.sections)
 
-    def entries(self) -> list[tuple[int, str, int]]:
+    def entries(self) -> list[tuple[int, str, int, int]]:
+        """(urutan global, kategori, nomor untuk nama file, nomor di grid kategori)."""
         out, g = [], 0
         for cat, count in self.sections:
             for local in range(1, int(count) + 1):
                 g += 1
-                out.append((g, cat, g if self.global_numbering else local))
+                out.append((g, cat, g if self.global_numbering else local, local))
         end = self.end or self.total
         return [e for e in out if self.start <= e[0] <= end]
 
@@ -76,11 +78,19 @@ class NavConfig:
     columns: int = 5
     point: Optional[list] = None        # tombol "berikutnya"
     key: str = "right"
+    per_category: bool = True           # grid mulai dari 1 lagi di tiap Tipe Soal
+    category_dropdown: Optional[list] = None          # tombol dropdown "Tipe Soal"
+    category_options: dict = field(default_factory=dict)  # kategori -> posisi pilihan
 
-    def validate(self) -> None:
+    def validate(self, categories: Optional[list] = None) -> None:
         if self.mode == "grid":
             if not (self.grid_first and self.grid_second and self.grid_below) or self.columns < 1:
                 raise AutoCaptureError("Posisi grid nomor soal belum diatur")
+            if self.per_category and categories and len(categories) > 1:
+                missing = [c for c in categories if not self.category_options.get(c)]
+                if not self.category_dropdown or missing:
+                    raise AutoCaptureError("Posisi dropdown Tipe Soal belum diatur"
+                                           + (f" (pilihan {', '.join(missing)})" if missing else ""))
         elif self.mode == "point":
             if not self.point:
                 raise AutoCaptureError("Posisi tombol 'berikutnya' belum diatur")
@@ -119,15 +129,28 @@ class Report:
 
 class AutoCapture:
     def __init__(self, pkg: Package, plan: Plan, cfg: RunConfig, driver: Driver,
-                 progress: Callable[[str], None] = lambda m: None):
+                 progress: Callable[[str], None] = lambda m: None,
+                 stop_event: Optional[threading.Event] = None):
         self.pkg, self.plan, self.cfg, self.d = pkg, plan, cfg, driver
         self.progress = progress
+        self.stop_event = stop_event or threading.Event()
         self.notches = cfg.notches
-        cfg.nav.validate()
+        self._shown_cat: Optional[str] = None
+        cats = [c for c, n in plan.sections if int(n) > 0]
+        cfg.nav.validate(cats)
         if not (cfg.crop and cfg.crop.get("rect") and cfg.crop.get("screen")):
             raise AutoCaptureError("Area potong belum diatur")
         x, y, w, h = cfg.crop["rect"]
         sw, sh = cfg.crop["screen"]
+        nav = cfg.nav
+        if nav.mode == "grid":   # semua tombol nomor yang akan diklik harus ada di layar
+            need = max((int(n) for _, n in plan.sections), default=1) if nav.per_category else plan.total
+            for n in (need, nav.columns):
+                px, py = nav.grid_position(n)
+                if not (0 <= px < sw and 0 <= py < sh):
+                    raise AutoCaptureError(f"Tombol nomor {n} di grid berada di luar layar ({px},{py}). "
+                                           "Perkecil zoom browser agar seluruh Daftar Soal terlihat, "
+                                           "lalu tandai ulang posisinya.")
         self.area_h = h
         self.center = (x + w // 2, y + h // 2)
         # parkir mouse di luar area potong (tidak di pojok kiri atas = tombol berhenti)
@@ -138,7 +161,7 @@ class AutoCapture:
 
     # ------------------------------------------------------------ helpers
     def _check(self):
-        if self.d.stop_requested():
+        if self.stop_event.is_set() or self.d.stop_requested():
             raise StopRequested()
 
     def _sleep(self, s: float):
@@ -177,12 +200,30 @@ class AutoCapture:
         img.save(p, "PNG")
         return Path(p)
 
-    def _navigate(self, g: int, first: bool):
+    def _select_category(self, cat: str):
+        nav = self.cfg.nav
+        opt = nav.category_options.get(cat)
+        if not (nav.category_dropdown and opt):
+            self.progress(f"  Tipe Soal {cat} tidak diatur — memakai tipe yang sedang tampil")
+            self._shown_cat = cat
+            return
+        self.progress(f"  memilih Tipe Soal {cat}")
+        self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)
+        self._sleep(0.4)
+        self.d.click(*nav.category_dropdown)
+        self._sleep(0.8)
+        self.d.click(*opt)
+        self._sleep(max(0.8, self.cfg.wait_load))
+        self._shown_cat = cat
+
+    def _navigate(self, g: int, first: bool, cat: str = "", local: int = 0, force_cat: bool = False):
         nav = self.cfg.nav
         if nav.mode == "grid":
+            if nav.per_category and (force_cat or cat != self._shown_cat):
+                self._select_category(cat)
             self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)   # grid di posisi awal
             self._sleep(0.3)
-            self.d.click(*nav.grid_position(g))
+            self.d.click(*nav.grid_position(local if nav.per_category else g))
         elif not first:
             if nav.mode == "point":
                 self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)
@@ -202,11 +243,18 @@ class AutoCapture:
             raise AutoCaptureError("Rencana soal kosong")
         try:
             prev_first: Optional[bytes] = None
-            for idx, (g, cat, num) in enumerate(entries):
+            started = False
+            for idx, (g, cat, num, local) in enumerate(entries):
                 self._check()
                 name = f"{cat}-{num:03d}"
-                self.progress(f"[{idx + 1}/{len(entries)}] {name}: membuka soal {g}")
-                item_id, first_bytes, existed = self._capture_first(g, cat, num, idx == 0, prev_first, rep)
+                if self.pkg.find_slot(cat, num) is not None:     # sudah lengkap sebelumnya
+                    rep.done.append(f"{name}.png")
+                    self.progress(f"[{idx + 1}/{len(entries)}] {name} sudah ada, dilewati")
+                    continue
+                self.progress(f"[{idx + 1}/{len(entries)}] {name}: membuka {cat} nomor {local}")
+                item_id, first_bytes, existed = self._capture_first(g, cat, num, not started, prev_first,
+                                                                    rep, local)
+                started = True
                 prev_first = first_bytes
                 if existed:
                     rep.done.append(f"{name}.png")
@@ -236,11 +284,11 @@ class AutoCapture:
             self.tmpdir.rmdir()
         return rep
 
-    def _capture_first(self, g, cat, num, first, prev_first, rep):
+    def _capture_first(self, g, cat, num, first, prev_first, rep, local=0):
         """Kembalikan (item_id, bytes tangkapan pertama, sudah_ada_sebelumnya)."""
         last_dup = None
         for attempt in range(3):
-            self._navigate(g, first and attempt == 0)
+            self._navigate(g, first and attempt == 0, cat, local or num, force_cat=attempt > 0)
             img = self._stable()
             if prev_first is not None and img.tobytes() == prev_first:
                 self.progress(f"  halaman belum berganti, coba lagi ({attempt + 1}/3)")
@@ -261,7 +309,8 @@ class AutoCapture:
             return res.item.id, img.tobytes(), False
         why = (f"tampilannya sama dengan {last_dup} yang sudah tersimpan (navigasi tidak berpindah, "
                f"atau soal ini sudah disimpan sebagai {last_dup})" if last_dup else "halaman tidak berganti")
-        raise AutoCaptureError(f"Soal {g} ({cat}-{num:03d}) gagal: {why}. Periksa pengaturan navigasi.")
+        raise AutoCaptureError(f"Soal {cat} nomor {local or num} ({cat}-{num:03d}) gagal: {why}. "
+                               "Periksa posisi grid / Tipe Soal.")
 
     def _scroll_down_and_grab(self, notches: int) -> Image.Image:
         self.d.scroll(*self.center, -notches)

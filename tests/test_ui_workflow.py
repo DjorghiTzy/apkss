@@ -247,7 +247,7 @@ def test_grab_button_and_auto_capture_in_window(win, monkeypatch):
     # Tangkap Otomatis 4 soal lewat grid
     x, y = GRID["first"]
     nav = NavConfig(mode="grid", grid_first=[x, y], grid_second=[x + GRID["dx"], y],
-                    grid_below=[x, y + GRID["dy"]], columns=GRID["cols"])
+                    grid_below=[x, y + GRID["dy"]], columns=GRID["cols"], per_category=False)
     w.start_auto_capture(Plan(sections=[["TWK", 2], ["TIU", 2]]), nav, 0.0, delay_ms=0)
     assert w.auto_running and not w.centralWidget().isEnabled()
     assert wait_until(lambda: not w.auto_running, timeout=120)
@@ -257,3 +257,45 @@ def test_grab_button_and_auto_capture_in_window(win, monkeypatch):
     assert names_now == ["TIU-001.png", "TIU-002.png", "TKP-009.png", "TWK-001.png", "TWK-002.png"]
     assert w.pkg.find_slot("TWK", 2).height == 1600
     assert w.table.rowCount() == 5
+
+
+def test_f10_toggle_starts_with_saved_settings_and_stops(win, monkeypatch):
+    from dataclasses import asdict
+
+    from tests.fake_browser import CAT_GRID, CROP, DROPDOWN, OPTIONS, FakeCategoryBrowser
+    from screenshot_manager.autocapture import NavConfig
+
+    w = win
+    counts = {"TWK": 3, "TIU": 3, "TKP": 3}
+    b = FakeCategoryBrowser(counts, px_per_notch=60)
+    w.driver_factory = lambda: b
+    w.settings["crop"] = dict(CROP)
+    info = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a[2]))
+    opened = []
+    monkeypatch.setattr(type(w), "open_auto_capture", lambda self: opened.append(1))
+
+    # tanpa pengaturan -> F10 membuka dialog, tidak berjalan
+    w.settings["auto"] = {}
+    w.toggle_auto()
+    assert opened and not w.auto_running
+
+    x, y = CAT_GRID["first"]
+    nav = NavConfig(mode="grid", grid_first=[x, y], grid_second=[x + CAT_GRID["dx"], y],
+                    grid_below=[x, y + CAT_GRID["dy"]], columns=5, per_category=True,
+                    category_dropdown=list(DROPDOWN), category_options={k: list(v) for k, v in OPTIONS.items()})
+    w.settings["auto"] = {"sections": [[c, n] for c, n in counts.items()], "global": False,
+                          "nav": asdict(nav), "wait_load": 0.0}
+    w.toggle_auto()                                  # F10 -> mulai
+    assert w.auto_running
+    assert wait_until(lambda: len(w.pkg.items) >= 4, timeout=120)
+    w.toggle_auto()                                  # F10 -> berhenti
+    assert wait_until(lambda: not w.auto_running, timeout=30)
+    assert info and "dihentikan" in info[-1]
+    partial = len(w.pkg.items)
+    assert 3 <= partial < 9                      # soal yang sedang diambil dibuang
+    w.toggle_auto()                                  # F10 lagi -> melanjutkan sampai selesai
+    assert wait_until(lambda: not w.auto_running, timeout=180)
+    assert "SELESAI" in info[-1], info[-1]
+    assert sorted(i.filename for i in w.pkg.items) == [f"{c}-00{n}.png" for c in ("TIU", "TKP", "TWK")
+                                                       for n in (1, 2, 3)]

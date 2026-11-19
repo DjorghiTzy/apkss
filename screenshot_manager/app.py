@@ -351,12 +351,18 @@ class AutoCaptureDialog(QDialog):
 
         g_nav = QGroupBox("2. Cara pindah soal")
         vn = QVBoxLayout(g_nav)
+        self.chk_percat = QCheckBox("Nomor mulai dari 1 di tiap Tipe Soal (ganti kategori lewat dropdown)")
+        self.chk_percat.setToolTip("Seperti Privat Alfaiz: Daftar Soal TWK 1–30, lalu pilih Tipe Soal TIU, "
+                                   "Daftar Soal 1–35, dst.")
+        self.chk_percat.setChecked(self.nav.per_category)
+        self.chk_percat.toggled.connect(self._upd)
         self.cb_nav = QComboBox()
         for key, label in NAV_MODES:
             self.cb_nav.addItem(label, key)
         self.cb_nav.setCurrentIndex([k for k, _ in NAV_MODES].index(self.nav.mode))
         self.cb_nav.currentIndexChanged.connect(self._upd)
         vn.addWidget(self.cb_nav)
+        vn.addWidget(self.chk_percat)
         hn = QHBoxLayout()
         self.sp_cols = QSpinBox()
         self.sp_cols.setMinimumSize(70, 28)
@@ -370,8 +376,15 @@ class AutoCaptureDialog(QDialog):
         hn.addStretch(1)
         hn.addWidget(self.btn_pos)
         vn.addLayout(hn)
+        hd = QHBoxLayout()
+        self.btn_dd = QPushButton("Tandai Dropdown Tipe Soal…")
+        self.btn_dd.clicked.connect(self._pick_dropdown)
+        hd.addStretch(1)
+        hd.addWidget(self.btn_dd)
+        vn.addLayout(hd)
         self.lbl_nav = QLabel()
         self.lbl_nav.setWordWrap(True)
+        self.lbl_nav.setMinimumHeight(48)
         vn.addWidget(self.lbl_nav)
         lay.addWidget(g_nav)
 
@@ -389,9 +402,11 @@ class AutoCaptureDialog(QDialog):
         lay.addWidget(g_opt)
 
         tip = QLabel("<b>Sebelum mulai:</b> buka halaman <u>pembahasan</u> tryout di browser (layar penuh), "
-                     "pastikan grid nomor soal terlihat. Aplikasi akan bersembunyi, lalu mengklik, scroll, dan "
-                     "memotret sendiri. Jangan sentuh mouse/keyboard selama berjalan.<br>"
-                     "<b>Berhenti kapan saja:</b> tekan <b>ESC</b> atau geser mouse ke <b>pojok kiri atas</b> layar.")
+                     "pastikan seluruh Daftar Soal terlihat. Aplikasi akan bersembunyi, lalu memilih Tipe Soal, "
+                     "mengklik nomor, scroll, dan memotret sendiri. Jangan sentuh mouse/keyboard selama berjalan.<br>"
+                     "<b>F10</b> = mulai / berhenti dari jendela mana pun (memakai pengaturan terakhir). "
+                     "Juga bisa berhenti dengan <b>ESC</b> atau mouse ke <b>pojok kiri atas</b>. "
+                     "Menjalankan lagi akan melanjutkan soal yang belum ada.")
         tip.setWordWrap(True)
         tip.setStyleSheet("background:#fff1c9; padding:8px; border-radius:6px")
         lay.addWidget(tip)
@@ -419,16 +434,30 @@ class AutoCaptureDialog(QDialog):
                     start=self.sp_start.value(), end=self.sp_end.value(),
                     global_numbering=self.rb_global.isChecked())
 
+    def _plan_cats(self) -> list[str]:
+        return [c for c, sp in self.spins.items() if sp.value()]
+
     def _upd(self):
         mode = self.cb_nav.currentData()
         self.nav.mode = mode
+        self.nav.per_category = self.chk_percat.isChecked()
+        percat = mode == "grid" and self.nav.per_category
         self.sp_cols.setVisible(mode == "grid")
         self.lbl_cols.setVisible(mode == "grid")
+        self.chk_percat.setVisible(mode == "grid")
+        self.btn_dd.setVisible(percat)
         self.btn_pos.setVisible(mode != "key")
         if mode == "grid":
             ok = bool(self.nav.grid_first and self.nav.grid_second and self.nav.grid_below)
-            self.lbl_nav.setText(("✔ Posisi grid sudah ditandai." if ok else "⚠ Belum ditandai.")
-                                 + " Tandai tombol nomor 1, nomor 2, dan nomor tepat di bawah nomor 1.")
+            text = (("✔ Posisi Daftar Soal sudah ditandai." if ok else "⚠ Daftar Soal belum ditandai.")
+                    + " (tombol nomor 1, nomor 2, dan nomor tepat di bawah nomor 1)")
+            if percat:
+                cats = self._plan_cats()
+                miss = [c for c in cats if not self.nav.category_options.get(c)]
+                dd_ok = bool(self.nav.category_dropdown) and not miss
+                text += ("<br>✔ Dropdown Tipe Soal sudah ditandai (" + ", ".join(cats) + ")." if dd_ok else
+                         "<br>⚠ Dropdown Tipe Soal belum ditandai" + (f" ({', '.join(miss)})" if miss else "") + ".")
+            self.lbl_nav.setText(text)
         elif mode == "point":
             self.lbl_nav.setText(("✔ Posisi tombol sudah ditandai." if self.nav.point else "⚠ Belum ditandai.")
                                  + " Tombol harus terlihat di posisi yang sama setelah halaman di-scroll ke atas. "
@@ -452,10 +481,41 @@ class AutoCaptureDialog(QDialog):
         else:
             self.lbl_summary.setText("Rencana kosong")
 
+    def _pick_dropdown(self):
+        cats = self._plan_cats()
+        names = {"TWK": "Tes Wawasan Kebangsaan", "TIU": "Tes Intelegensi Umum", "TKP": "Tes Karakteristik Pribadi"}
+
+        def got_button(path):
+            dlg = PointPickDialog(self, path, ["tombol dropdown “Tipe Soal” (dalam keadaan TERTUTUP)"])
+            if dlg.exec() != QDialog.Accepted:
+                return self._upd()
+            self.nav.category_dropdown = dlg.points()[0]
+            self._save()
+            QMessageBox.information(
+                self, "Tandai pilihan Tipe Soal",
+                "Langkah 2: setelah klik OK, aplikasi bersembunyi 5 detik.\n\n"
+                "Dalam 5 detik itu klik dropdown “Tipe Soal” di browser sampai daftar pilihannya TERBUKA, "
+                "lalu diamkan (jangan pilih apa pun).")
+            self.win.grab_reference(got_options, hide=[self], delay_ms=5000)
+
+        def got_options(path):
+            prompts = [f"pilihan “{names.get(c, c)}” ({c})" for c in cats]
+            dlg = PointPickDialog(self, path, prompts)
+            if dlg.exec() == QDialog.Accepted:
+                self.nav.category_options = dict(zip(cats, dlg.points()))
+                self._save()
+            self._upd()
+        if not cats:
+            return
+        QMessageBox.information(self, "Tandai dropdown Tipe Soal",
+                                "Langkah 1: pastikan dropdown “Tipe Soal” di browser TERTUTUP. "
+                                "Setelah klik OK aplikasi memotret layar, lalu klik tombol dropdown itu di gambar.")
+        self.win.grab_reference(got_button, hide=[self])
+
     def _pick(self):
         mode = self.cb_nav.currentData()
-        prompts = (["tombol nomor 1", "tombol nomor 2 (di kanan nomor 1)",
-                    "tombol tepat di BAWAH nomor 1"] if mode == "grid" else ["tombol “Berikutnya”"])
+        prompts = (["tombol nomor 1 di Daftar Soal", "tombol nomor 2 (di kanan nomor 1)",
+                    "tombol tepat di BAWAH nomor 1 (mis. nomor 6)"] if mode == "grid" else ["tombol “Berikutnya”"])
 
         def got(path):
             dlg = PointPickDialog(self, path, prompts)
@@ -472,6 +532,7 @@ class AutoCaptureDialog(QDialog):
     def _save(self):
         self.nav.columns = self.sp_cols.value()
         self.nav.mode = self.cb_nav.currentData()
+        self.nav.per_category = self.chk_percat.isChecked()
         from dataclasses import asdict
         self.win.settings["auto"] = {
             "sections": [[c, sp.value()] for c, sp in self.spins.items()],
@@ -481,7 +542,7 @@ class AutoCaptureDialog(QDialog):
     def _start(self):
         self._save()
         try:
-            self.nav.validate()
+            self.nav.validate(self._plan_cats())
         except AutoCaptureError as exc:
             QMessageBox.warning(self, "Tangkap Otomatis", str(exc))
             return
@@ -561,6 +622,8 @@ class MainWindow(QMainWindow):
         self.waiting_crop_reference = False
         self.auto_running = False
         self.auto_worker: AutoWorker | None = None
+        self.auto_stop = threading.Event()
+        self._hotkey_hwnd = None
         self.screen_grabber = win_input.grab_screen if win_input.available() else None
         self.driver_factory = win_input.WindowsDriver if win_input.available() else None
         self.last_item_id: str | None = None
@@ -754,7 +817,8 @@ class MainWindow(QMainWindow):
         self.btn_grab.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.btn_grab.clicked.connect(self.grab_now)
         lay.addWidget(self.btn_grab)
-        self.btn_auto = QPushButton("⚡ TANGKAP OTOMATIS…")
+        self.btn_auto = QPushButton("⚡ TANGKAP OTOMATIS…  (F10)")
+        self.btn_auto.setToolTip("F10 di mana pun: mulai dengan pengaturan terakhir / berhenti")
         self.btn_auto.setMinimumHeight(48)
         self.btn_auto.setStyleSheet("font-size:15px; font-weight:bold; background:#6f42c1; color:white;"
                                     "border-radius:6px;")
@@ -1311,13 +1375,13 @@ class MainWindow(QMainWindow):
             Path(path).unlink(missing_ok=True)
         self._hidden_grab(done)
 
-    def grab_reference(self, callback, hide=()):
+    def grab_reference(self, callback, hide=(), delay_ms: int = 900):
         def done(path):
             try:
                 callback(path)
             finally:
                 Path(path).unlink(missing_ok=True)
-        self._hidden_grab(done, hide=hide)
+        self._hidden_grab(done, hide=hide, delay_ms=delay_ms)
 
     def open_auto_capture(self):
         if self.driver_factory is None:
@@ -1328,11 +1392,15 @@ class MainWindow(QMainWindow):
         self.start_auto_capture(dlg.plan(), dlg.nav, dlg.sp_wait.value())
 
     def start_auto_capture(self, plan: Plan, nav: NavConfig, wait_load: float, delay_ms: int = 1200):
-        cfg = RunConfig(crop=dict(self.settings["crop"]), nav=nav, wait_load=wait_load)
+        cfg = RunConfig(crop=dict(self.settings["crop"] or {}), nav=nav, wait_load=wait_load)
         self.auto_worker = AutoWorker(self)
+        self.auto_stop = threading.Event()
         try:
-            runner = AutoCapture(self.pkg, plan, cfg, self.driver_factory(), self.auto_worker.progress.emit)
+            runner = AutoCapture(self.pkg, plan, cfg, self.driver_factory(), self.auto_worker.progress.emit,
+                                 stop_event=self.auto_stop)
         except AutoCaptureError as exc:
+            self.showNormal()
+            self.raise_()
             return self.error(str(exc))
         self.disarm(silent=True)
         self.auto_running = True
@@ -1344,6 +1412,70 @@ class MainWindow(QMainWindow):
         self.auto_worker.failed.connect(lambda m: self._on_auto_finished(None, m))
         self.showMinimized()
         QTimer.singleShot(delay_ms, lambda: self.auto_worker.start(runner))
+
+    def toggle_auto(self):
+        """F10: mulai Tangkap Otomatis dengan pengaturan terakhir, atau hentikan bila sedang berjalan."""
+        if self.auto_running:
+            self.auto_stop.set()
+            self.log_event("F10: menghentikan Tangkap Otomatis…", "warn")
+            return
+        if self.driver_factory is None:
+            return self.error("Tangkap Otomatis hanya tersedia di Windows.")
+        saved = self.settings["auto"] or {}
+        try:
+            nav = NavConfig(**{k: v for k, v in (saved.get("nav") or {}).items()
+                               if k in NavConfig.__dataclass_fields__})
+            sections = [s_ for s_ in (saved.get("sections") or []) if s_[1]]
+            plan = Plan(sections=sections, global_numbering=bool(saved.get("global")))   # semua soal
+            if not sections or not plan.entries():
+                raise AutoCaptureError("rencana belum diatur")
+            nav.validate([c for c, _ in sections])
+        except (AutoCaptureError, TypeError, ValueError) as exc:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            self.log_event(f"F10: pengaturan belum lengkap ({exc}) — buka Tangkap Otomatis", "warn")
+            return self.open_auto_capture()
+        self.log_event("F10: Tangkap Otomatis dimulai", "ok")
+        self.start_auto_capture(plan, nav, float(saved.get("wait_load", 1.5)), delay_ms=800)
+
+    # ---------- hotkey global F10 (Windows)
+    HOTKEY_ID = 0xB10
+
+    def _register_hotkey(self):
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            u = ctypes.windll.user32
+            if getattr(self, "_hotkey_hwnd", None):
+                u.UnregisterHotKey(self._hotkey_hwnd, self.HOTKEY_ID)
+            hwnd = int(self.winId())
+            ok = u.RegisterHotKey(hwnd, self.HOTKEY_ID, 0x4000, 0x79)   # MOD_NOREPEAT, VK_F10
+            self._hotkey_hwnd = hwnd if ok else None
+            if not ok:
+                self.log_event("F10 tidak bisa didaftarkan (dipakai aplikasi lain). Pakai tombol di aplikasi.",
+                               "warn")
+        except Exception as exc:  # noqa: BLE001
+            self._hotkey_hwnd = None
+            log.warning("Gagal mendaftarkan F10: %s", exc)
+
+    def nativeEvent(self, event_type, message):
+        if sys.platform == "win32" and bytes(event_type) == b"windows_generic_MSG":
+            try:
+                import ctypes.wintypes
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                if msg.message == 0x0312 and msg.wParam == self.HOTKEY_ID:   # WM_HOTKEY
+                    QTimer.singleShot(0, self.toggle_auto)
+                    return True, 0
+            except Exception:  # noqa: BLE001
+                pass
+        return super().nativeEvent(event_type, message)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if sys.platform == "win32" and getattr(self, "_hotkey_hwnd", None) != int(self.winId()):
+            self._register_hotkey()
 
     def _on_auto_progress(self, msg: str):
         self.log_event(msg)
@@ -1441,8 +1573,9 @@ class MainWindow(QMainWindow):
 
     def set_on_top(self, on: bool):
         self.settings["always_on_top"] = on
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, on)   # membuat ulang jendela (hwnd baru)
         self.show()
+        self._register_hotkey()
 
     # ============================================================ list
     def _thumb(self, item: Item) -> QPixmap:
@@ -1735,6 +1868,14 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     def closeEvent(self, e):
+        if self.auto_running:
+            self.auto_stop.set()
+        if sys.platform == "win32" and getattr(self, "_hotkey_hwnd", None):
+            try:
+                import ctypes
+                ctypes.windll.user32.UnregisterHotKey(self._hotkey_hwnd, self.HOTKEY_ID)
+            except Exception:  # noqa: BLE001
+                pass
         self.watcher.stop()
         super().closeEvent(e)
 
