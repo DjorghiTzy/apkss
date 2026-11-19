@@ -273,7 +273,7 @@ def test_f10_toggle_starts_with_saved_settings_and_stops(win, monkeypatch):
     info = []
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a[2]))
     opened = []
-    monkeypatch.setattr(type(w), "open_auto_capture", lambda self: opened.append(1))
+    monkeypatch.setattr(type(w), "run_auto_setup", lambda self, *a, **k: opened.append(1))
 
     # tanpa pengaturan -> F10 membuka dialog, tidak berjalan
     w.settings["auto"] = {}
@@ -323,3 +323,39 @@ def test_point_pick_dialog_grid_preview(win, tmp_path):
                                                                                       y + 8 * GRID["dy"])
     dlg.show()
     dlg.grab().save(str(tmp_path / "preview.png"))
+
+
+def test_f10_without_settings_runs_auto_setup_then_capture(win, monkeypatch):
+    from screenshot_manager import app as appmod
+    from tests.fake_browser import FakeAlfaiz
+
+    w = win
+    counts = {"TWK": 6, "TIU": 7, "TKP": 6}
+    b = FakeAlfaiz(counts, start_cat="TKP")
+    w.driver_factory = lambda: b
+    w.settings["auto"] = {"wait_load": 0.0}
+    w.settings["crop"] = {"enabled": False, "rect": None, "screen": None}
+    info = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a[2]))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: info.append("WARN " + a[2]))
+    shown = []
+
+    def fake_exec(dlg):
+        shown.append(dlg)
+        dlg.choice = "start"
+        return QDialog.Accepted
+    from PySide6.QtWidgets import QDialog
+    monkeypatch.setattr(appmod.SetupResultDialog, "exec", fake_exec)
+
+    w.toggle_auto()                                     # F10 pertama kali
+    assert w.setup_running
+    assert wait_until(lambda: shown, timeout=120), info
+    assert w.settings["auto"]["sections"] == [["TWK", 6], ["TIU", 7], ["TKP", 6]]
+    assert w.settings["crop"]["rect"][1] == FakeAlfaiz.CONTENT[1]
+    assert wait_until(lambda: w.auto_running, timeout=10)
+    assert wait_until(lambda: not w.auto_running, timeout=240)
+    assert info and "SELESAI" in info[-1], info
+    assert len(w.pkg.items) == 19
+    for cat, n in counts.items():
+        for k in range(1, n + 1):
+            assert w.pkg.find_slot(cat, k).height == b.page_of(cat, k).height

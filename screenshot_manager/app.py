@@ -25,7 +25,8 @@ from . import __version__
 from .core import (DuplicateImageError, IMAGE_EXTS, Item, ManagerError, Package,
                    SlotTakenError, list_packages, make_filename, sanitize_package_name)
 from . import updater, win_input
-from .autocapture import AutoCapture, AutoCaptureError, NavConfig, Plan, RunConfig
+from .autocapture import AutoCapture, AutoCaptureError, NavConfig, Plan, RunConfig, StopRequested
+from .autosetup import SetupError, run_autosetup
 from .watcher import FolderWatcher
 
 APP_NAME = "Screenshot Manager"
@@ -352,6 +353,11 @@ class AutoCaptureDialog(QDialog):
         counts = dict(saved.get("sections") or [["TWK", 30], ["TIU", 35], ["TKP", 45]])
         lay = QVBoxLayout(self)
 
+        b_auto = QPushButton("🪄 Atur Otomatis — deteksi semua pengaturan dari layar (disarankan)")
+        b_auto.setStyleSheet("font-weight:bold; background:#2e9e48; color:white; padding:8px")
+        b_auto.clicked.connect(lambda: (self.reject(), QTimer.singleShot(200, self.win.run_auto_setup)))
+        lay.addWidget(b_auto)
+        lay.addWidget(QLabel("<i>atau atur manual:</i>"))
         g_plan = QGroupBox("1. Rencana soal (urutan sama dengan website)")
         fp = QFormLayout(g_plan)
         self.spins = {}
@@ -601,6 +607,67 @@ class AutoCaptureDialog(QDialog):
         self.accept()
 
 
+class SetupResultDialog(QDialog):
+    """Tampilkan hasil Atur Otomatis untuk dicek sebelum dipakai."""
+
+    def __init__(self, parent, res):
+        super().__init__(parent)
+        self.setWindowTitle("Hasil Atur Otomatis")
+        self.choice = None
+        lay = QVBoxLayout(self)
+        x, y, w, h = res.crop["rect"]
+        counts = ", ".join(f"{c} {n}" for c, n in res.counts.items())
+        info = QLabel(f"<b>Terdeteksi:</b> {counts} soal (total {sum(res.counts.values())}) · Daftar Soal "
+                      f"{res.nav.columns} kolom · area konten {w}×{h}px<br>"
+                      "Kotak <b style='color:#d9a400'>kuning</b> = area yang dipotret, lingkaran "
+                      "<b style='color:#1f6feb'>biru</b> = nomor yang akan diklik, lingkaran "
+                      "<b style='color:#ff2d55'>merah</b> = tombol Tipe Soal."
+                      + ("<br>⚠ " + "; ".join(res.notes) if res.notes else ""))
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        from PIL.ImageQt import ImageQt
+        pm = QPixmap.fromImage(ImageQt(res.preview))
+        geo = QApplication.primaryScreen().availableGeometry()
+        pic = QLabel()
+        pic.setPixmap(pm.scaled(int(geo.width() * 0.85), int(geo.height() * 0.65),
+                                Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        lay.addWidget(pic, 0, Qt.AlignCenter)
+        row = QHBoxLayout()
+        b_start = QPushButton("▶ Simpan && Mulai Sekarang")
+        b_start.setStyleSheet("font-weight:bold; background:#1f6feb; color:white; padding:8px 16px")
+        b_save = QPushButton("Simpan Saja")
+        b_cancel = QPushButton("Batal")
+        b_start.clicked.connect(lambda: self._done("start"))
+        b_save.clicked.connect(lambda: self._done("save"))
+        b_cancel.clicked.connect(self.reject)
+        row.addStretch(1)
+        for b in (b_cancel, b_save, b_start):
+            row.addWidget(b)
+        lay.addLayout(row)
+
+    def _done(self, choice):
+        self.choice = choice
+        self.accept()
+
+
+class SetupWorker(QObject):
+    progress = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def start(self, driver, categories, wait_load, stop_event):
+        def run():
+            try:
+                self.finished.emit(run_autosetup(driver, categories, self.progress.emit, wait_load, stop_event))
+            except StopRequested:
+                self.failed.emit("dihentikan")
+            except SetupError as exc:
+                self.failed.emit(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                self.failed.emit(f"{type(exc).__name__}: {exc}")
+        threading.Thread(target=run, daemon=True).start()
+
+
 class AutoWorker(QObject):
     progress = Signal(str)
     finished = Signal(object)
@@ -669,6 +736,7 @@ class MainWindow(QMainWindow):
         self.auto_worker: AutoWorker | None = None
         self.auto_stop = threading.Event()
         self._hotkey_hwnd = None
+        self.setup_running = False
         self.screen_grabber = win_input.grab_screen if win_input.available() else None
         self.driver_factory = win_input.WindowsDriver if win_input.available() else None
         self.last_item_id: str | None = None
@@ -869,6 +937,14 @@ class MainWindow(QMainWindow):
                                     "border-radius:6px;")
         self.btn_auto.clicked.connect(self.open_auto_capture)
         lay.addWidget(self.btn_auto)
+        self.btn_setup = QPushButton("🪄 ATUR OTOMATIS (deteksi layar)")
+        self.btn_setup.setToolTip("Buka halaman pembahasan di browser, lalu klik ini: aplikasi mengenali "
+                                  "Daftar Soal, Tipe Soal, jumlah soal, dan area konten sendiri.")
+        self.btn_setup.setMinimumHeight(44)
+        self.btn_setup.setStyleSheet("font-size:14px; font-weight:bold; background:#2e9e48; color:white;"
+                                     "border-radius:6px;")
+        self.btn_setup.clicked.connect(lambda: self.run_auto_setup())
+        lay.addWidget(self.btn_setup)
         grid = QGridLayout()
         btn_cancel = QPushButton("Batalkan")
         btn_cancel.setShortcut(QKeySequence("Esc"))
@@ -905,12 +981,12 @@ class MainWindow(QMainWindow):
         lay.addWidget(g_crop)
         lay.addStretch(1)
         # urutan: Paket -> Tangkap Otomatis -> Area potong -> kontrol manual
-        for i, wdg in enumerate((self.btn_auto, g_crop), start=1):
+        for i, wdg in enumerate((self.btn_setup, self.btn_auto, g_crop), start=1):
             lay.removeWidget(wdg)
             lay.insertWidget(i, wdg)
         lbl_manual = QLabel("<b>Manual / per soal</b>")
         lbl_manual.setStyleSheet("margin-top:6px")
-        lay.insertWidget(3, lbl_manual)
+        lay.insertWidget(4, lbl_manual)
         return panel
 
     def _build_list_panel(self) -> QWidget:
@@ -1458,11 +1534,73 @@ class MainWindow(QMainWindow):
         self.showMinimized()
         QTimer.singleShot(delay_ms, lambda: self.auto_worker.start(runner))
 
+    def _setup_categories(self) -> list[str]:
+        saved = (self.settings["auto"] or {}).get("sections") or []
+        cats = [c for c, _ in saved if c in self.pkg.categories] or \
+            [c for c in ("TWK", "TIU", "TKP") if c in self.pkg.categories]
+        return cats
+
+    def run_auto_setup(self, wait_load: float | None = None, delay_ms: int = 1000):
+        if self.driver_factory is None:
+            return self.error("Atur Otomatis hanya tersedia di Windows.")
+        if self.setup_running or self.auto_running:
+            return
+        wait = float(wait_load if wait_load is not None else (self.settings["auto"] or {}).get("wait_load", 1.5))
+        self.setup_running = True
+        self.auto_stop = threading.Event()
+        self.centralWidget().setEnabled(False)
+        self.log_event("Atur Otomatis: mendeteksi tata letak halaman…", "ok")
+        self.setup_worker = SetupWorker(self)
+        self.setup_worker.progress.connect(lambda m: (self.log_event(m),
+                                                      self.setWindowTitle(f"{APP_NAME} — ATUR OTOMATIS {m[:50]}")))
+        self.setup_worker.finished.connect(self._on_setup_done)
+        self.setup_worker.failed.connect(self._on_setup_failed)
+        self.showMinimized()
+        driver = self.driver_factory()
+        QTimer.singleShot(delay_ms, lambda: self.setup_worker.start(driver, self._setup_categories(), wait,
+                                                                      self.auto_stop))
+
+    def _restore_after_setup(self):
+        self.setup_running = False
+        self.centralWidget().setEnabled(True)
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self._update_capture_labels()
+
+    def _on_setup_failed(self, msg: str):
+        self._restore_after_setup()
+        self.error(f"Atur Otomatis gagal: {msg}")
+        QMessageBox.warning(self, "Atur Otomatis", f"Atur Otomatis gagal:\n\n{msg}\n\n"
+                            "Pastikan halaman PEMBAHASAN terbuka di browser (layar penuh) dengan Tipe Soal dan "
+                            "seluruh Daftar Soal terlihat, lalu coba lagi.")
+
+    def _on_setup_done(self, res):
+        self._restore_after_setup()
+        from dataclasses import asdict
+        dlg = SetupResultDialog(self, res)
+        if dlg.exec() != QDialog.Accepted or dlg.choice is None:
+            self.log_event("Hasil Atur Otomatis tidak dipakai", "warn")
+            return
+        prev = self.settings["auto"] or {}
+        self.settings["crop"] = dict(res.crop)
+        self.settings["auto"] = {"sections": [[c, n] for c, n in res.counts.items()],
+                                 "global": bool(prev.get("global")), "nav": asdict(res.nav),
+                                 "wait_load": float(prev.get("wait_load", 1.5))}
+        self._refresh_crop_label()
+        total = sum(res.counts.values())
+        self.set_banner(f"✔ Atur Otomatis tersimpan: {total} soal. Tekan F10 untuk mulai/berhenti.", "ok")
+        self.log_event(f"Atur Otomatis tersimpan: {res.counts}", "ok")
+        if dlg.choice == "start":
+            self.toggle_auto()
+
     def toggle_auto(self):
-        """F10: mulai Tangkap Otomatis dengan pengaturan terakhir, atau hentikan bila sedang berjalan."""
-        if self.auto_running:
+        """F10: mulai Tangkap Otomatis dengan pengaturan terakhir, atau hentikan bila sedang berjalan.
+
+        Belum pernah diatur -> jalankan Atur Otomatis dulu."""
+        if self.auto_running or self.setup_running:
             self.auto_stop.set()
-            self.log_event("F10: menghentikan Tangkap Otomatis…", "warn")
+            self.log_event("F10: menghentikan…", "warn")
             return
         if self.driver_factory is None:
             return self.error("Tangkap Otomatis hanya tersedia di Windows.")
@@ -1476,11 +1614,12 @@ class MainWindow(QMainWindow):
                 raise AutoCaptureError("rencana belum diatur")
             nav.validate([c for c, _ in sections])
         except (AutoCaptureError, TypeError, ValueError) as exc:
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
-            self.log_event(f"F10: pengaturan belum lengkap ({exc}) — buka Tangkap Otomatis", "warn")
-            return self.open_auto_capture()
+            self.log_event(f"F10: pengaturan belum lengkap ({exc}) — menjalankan Atur Otomatis", "warn")
+            return self.run_auto_setup()
+        c = self.settings["crop"] or {}
+        if not (c.get("rect") and c.get("screen")):
+            self.log_event("F10: area belum diatur — menjalankan Atur Otomatis", "warn")
+            return self.run_auto_setup()
         self.log_event("F10: Tangkap Otomatis dimulai", "ok")
         self.start_auto_capture(plan, nav, float(saved.get("wait_load", 1.5)), delay_ms=800)
 

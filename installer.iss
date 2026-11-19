@@ -2,7 +2,7 @@
 ; Kompilasi: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 #define AppName "Screenshot Manager"
 #ifndef AppVersion
-  #define AppVersion "1.0.4"
+  #define AppVersion "1.0.5"
 #endif
 
 [Setup]

@@ -130,3 +130,109 @@ class FakeCategoryBrowser(FakeBrowser):
 
     def key(self, name):
         pass
+
+
+# ---------------------------------------------------------------- tampilan penuh mirip Privat Alfaiz
+class FakeAlfaiz:
+    """Layar lengkap: toolbar browser, header situs (menempel), kolom konten, sidebar
+    (kapsul Tipe Soal + grid Daftar Soal merah), menu dropdown, taskbar."""
+
+    W, H = 1366, 768
+    CONTENT = [300, 100, 760, 628]             # area yang ter-scroll
+    PILL = (1100, 128, 1300, 172)
+    MENU = (1100, 175, 1300, 355)
+    SEPS = (235, 295)
+    GRID0, DX, DY, COLS, BOX = (1130, 240), 46, 42, 5, 30
+    CATS = ["TWK", "TIU", "TKP"]
+
+    def __init__(self, counts, height_of=lambda cat, n: 900 + (n * 173) % 1500, start_cat="TWK",
+                 px_per_notch=53):
+        self.counts = counts
+        self.pages = {(c, n): make_page(1000 * (i + 1) + n, height_of(c, n))
+                      for i, c in enumerate(self.CATS) if c in counts for n in range(1, counts[c] + 1)}
+        self.cat, self.n, self.scroll_y, self.open = start_cat, 1, 0, False
+        self.px = px_per_notch
+        self.clicks, self.cat_switches, self.grabs = [], [], 0
+
+    def page_of(self, cat, n):
+        return self.pages[(cat, n)]
+
+    # ---- render
+    def grab(self):
+        self.grabs += 1
+        W, H = self.W, self.H
+        scr = Image.new("RGB", (W, H), "white")
+        d = ImageDraw.Draw(scr)
+        x, y, w, h = self.CONTENT
+        page = self.pages[(self.cat, self.n)]
+        part = page.crop((0, self.scroll_y, w, min(page.height, self.scroll_y + h)))
+        scr.paste(part, (x, y))
+        d.rectangle([0, 0, W, 60], fill="#202124")                     # toolbar browser
+        d.text((300, 25), "casn.privatalfaiz.id/#!/ujian/pembahasan", fill="#ddd")
+        d.rectangle([0, 60, W, 99], fill="#8b0000")                    # header situs menempel
+        d.text((600, 75), "AL FAIZ   Beranda   Mulai Belajar", fill="white")
+        d.rectangle([0, H - 40, W, H], fill="#1b1b2b")                  # taskbar
+        for i in range(8):
+            d.rectangle([500 + i * 48, H - 32, 524 + i * 48, H - 8], fill=(60 + 20 * i, 120, 200))
+        d.rounded_rectangle([1085, 110, 1345, 640], radius=12, outline=(225, 225, 225), fill="white")
+        open_ = self.open
+        d.rounded_rectangle(self.PILL, radius=20, fill=(139, 0, 0) if open_ else (255, 236, 236),
+                            outline=(240, 150, 150), width=2)
+        d.text((1150, 145), {"TWK": "Wawasan", "TIU": "Intelegensi", "TKP": "Karakteristik"}[self.cat],
+               fill="white" if open_ else (139, 0, 0))
+        d.text((1100, 200), "Daftar Soal", fill="black")
+        for k in range(1, self.counts[self.cat] + 1):
+            gx, gy = self.pos(k)
+            col = (255, 152, 0) if k == self.n else (244, 67, 54)
+            d.rectangle([gx - 15, gy - 15, gx + 15, gy + 15], fill=col)
+            d.text((gx - 5, gy - 6), str(k), fill="white")
+        if open_:
+            d.rectangle(self.MENU, fill="white", outline=(200, 200, 200))
+            for sy in self.SEPS:
+                d.line([self.MENU[0] + 1, sy, self.MENU[2] - 1, sy], fill=(210, 210, 210))
+            for i, label in enumerate(["Tes Wawasan Kebangsaan", "Tes Intelegensi Umum", "Tes Karakteristik"]):
+                d.text((1110, 195 + i * 60), label, fill="black")
+        return scr
+
+    def pos(self, k):
+        r, c = divmod(k - 1, self.COLS)
+        return self.GRID0[0] + c * self.DX, self.GRID0[1] + r * self.DY
+
+    # ---- input
+    def move(self, x, y):
+        pass
+
+    def click(self, x, y):
+        self.clicks.append((x, y))
+        x0, y0, x1, y1 = self.PILL
+        if x0 <= x <= x1 and y0 <= y <= y1:
+            self.open = not self.open
+            return
+        if self.open:
+            mx0, my0, mx1, my1 = self.MENU
+            if mx0 <= x <= mx1 and my0 <= y <= my1:
+                bounds = [my0, *self.SEPS, my1]
+                for i, cat in enumerate(self.CATS):
+                    if bounds[i] < y < bounds[i + 1] and cat in self.counts:
+                        self.cat, self.n, self.scroll_y = cat, 1, 0
+                        self.cat_switches.append(cat)
+            self.open = False
+            return
+        for k in range(1, self.counts[self.cat] + 1):
+            gx, gy = self.pos(k)
+            if abs(x - gx) <= 15 and abs(y - gy) <= 15:
+                self.n, self.scroll_y = k, 0
+
+    def scroll(self, x, y, notches):
+        page = self.pages[(self.cat, self.n)]
+        max_y = max(0, page.height - self.CONTENT[3])
+        self.scroll_y = min(max_y, max(0, self.scroll_y - notches * self.px))
+
+    def key(self, name):
+        pass
+
+    def stop_requested(self):
+        return False
+
+    def sleep(self, s):
+        pass

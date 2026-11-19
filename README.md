@@ -45,6 +45,16 @@ menggerakkan mouse/keyboard seperti pengguna; tidak menyentuh login, cookie, ata
 Alurnya mengikuti Privat Alfaiz: pilih **Tipe Soal** TWK → klik nomor 1…30 di **Daftar Soal** →
 pilih Tipe Soal TIU → 1…35 → pilih TKP → 1…45. **F10** = mulai / berhenti dari jendela mana pun.
 
+**Cara tercepat (tanpa atur manual):**
+1. Buka halaman **pembahasan** tryout di browser, layar penuh, dengan Tipe Soal dan seluruh
+   Daftar Soal terlihat.
+2. Tekan **F10** (atau klik **🪄 ATUR OTOMATIS**). Aplikasi bersembunyi, mengenali Daftar Soal,
+   tombol Tipe Soal, jumlah soal tiap kategori, dan area konten sendiri, lalu menampilkan
+   gambar hasil deteksi. Klik **▶ Simpan & Mulai Sekarang**.
+3. Tunggu sampai selesai → **BUAT ZIP**. F10 berikutnya langsung mulai/berhenti/melanjutkan.
+
+**Atur manual (bila deteksi otomatis gagal):**
+
 1. Di browser: buka halaman **pembahasan** tryout, layar penuh, seluruh Daftar Soal terlihat.
    Perkecil zoom (Ctrl+−) bila perlu.
 2. Screenshot Manager → **Atur Area…** → **Ambil Layar Acuan** → seret kotak menutupi area konten
