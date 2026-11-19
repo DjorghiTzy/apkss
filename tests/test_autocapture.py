@@ -186,3 +186,22 @@ def test_missing_dropdown_and_offscreen_grid(tmp_path):
     AutoCapture(pkg, Plan(sections=[["TKP", 45]]), cfg(alfaiz_nav()), FakeCategoryBrowser({"TKP": 1}))
     with pytest.raises(AutoCaptureError, match="luar layar"):
         AutoCapture(pkg, Plan(sections=[["TKP", 80]]), cfg(alfaiz_nav()), FakeCategoryBrowser({"TKP": 1}))
+
+
+def test_grid_problem_detects_misclicks():
+    ok = alfaiz_nav()
+    assert ok.grid_problem(45, (1366, 768)) is None
+    x, y = CAT_GRID["first"]
+    bad = [
+        ([x, y], [x, y + 42], [x + 46, y]),          # titik 2 & 3 tertukar
+        ([x, y], [x + 46, y + 40], [x, y + 42]),     # titik 2 tidak sebaris
+        ([x, y], [x + 400, y], [x, y + 400]),        # jarak tidak wajar
+        ([x, y], [x + 46, y], [x, y + 90]),          # baris ke-45 keluar layar
+    ]
+    for p1, p2, p3 in bad:
+        nav = NavConfig(mode="grid", grid_first=p1, grid_second=p2, grid_below=p3, columns=5)
+        assert nav.grid_problem(45, (1366, 768)), (p1, p2, p3)
+    with pytest.raises(AutoCaptureError, match="Tandai Posisi"):
+        nav = NavConfig(mode="grid", grid_first=[x, y], grid_second=[x, y + 42], grid_below=[x + 46, y],
+                        columns=5, per_category=False)
+        AutoCapture(Package("/tmp/ws-gp", "P"), Plan(sections=[["TWK", 5]]), cfg(nav), FakeBrowser({1: 500}))

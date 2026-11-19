@@ -97,6 +97,27 @@ class NavConfig:
         elif self.mode != "key":
             raise AutoCaptureError(f"Mode navigasi tidak dikenal: {self.mode}")
 
+    def grid_problem(self, count: int, screen: tuple[int, int]) -> Optional[str]:
+        """Pesan bila tandaan grid tidak masuk akal (salah klik), atau None bila OK."""
+        if not (self.grid_first and self.grid_second and self.grid_below):
+            return "posisi grid belum ditandai"
+        x0, y0 = self.grid_first
+        dx = (self.grid_second[0] - x0, self.grid_second[1] - y0)
+        dy = (self.grid_below[0] - x0, self.grid_below[1] - y0)
+        if abs(dx[0]) < 8 or abs(dx[1]) * 3 > abs(dx[0]):
+            return "titik ke-2 harus tepat di KANAN nomor 1 (nomor 2, satu baris)"
+        if abs(dy[1]) < 8 or abs(dy[0]) * 3 > abs(dy[1]):
+            return "titik ke-3 harus tepat di BAWAH nomor 1 (nomor di baris kedua, kolom pertama)"
+        if max(abs(dx[0]), abs(dy[1])) > min(screen) / 4:
+            return "jarak antar nomor terlalu besar — klik tepat di tombol nomor 1, 2, dan di bawah 1"
+        sw, sh = screen
+        for n in (self.columns, count):
+            px, py = self.grid_position(n)
+            if not (0 <= px < sw and 0 <= py < sh):
+                return (f"nomor {n} akan berada di luar layar ({px},{py}) — periksa jumlah kolom, atau perkecil "
+                        "zoom browser agar seluruh Daftar Soal terlihat")
+        return None
+
     def grid_position(self, g: int) -> tuple[int, int]:
         row, col = divmod(g - 1, self.columns)
         x0, y0 = self.grid_first
@@ -145,12 +166,11 @@ class AutoCapture:
         nav = cfg.nav
         if nav.mode == "grid":   # semua tombol nomor yang akan diklik harus ada di layar
             need = max((int(n) for _, n in plan.sections), default=1) if nav.per_category else plan.total
-            for n in (need, nav.columns):
-                px, py = nav.grid_position(n)
-                if not (0 <= px < sw and 0 <= py < sh):
-                    raise AutoCaptureError(f"Tombol nomor {n} di grid berada di luar layar ({px},{py}). "
-                                           "Perkecil zoom browser agar seluruh Daftar Soal terlihat, "
-                                           "lalu tandai ulang posisinya.")
+            problem = nav.grid_problem(need, (sw, sh))
+            if problem:
+                raise AutoCaptureError(f"Posisi Daftar Soal salah: {problem}. Buka ⚡ Tangkap Otomatis → "
+                                       "“Tandai Posisi di Layar…” dan tandai ulang (titik tandaan: "
+                                       f"{nav.grid_first}, {nav.grid_second}, {nav.grid_below}).")
         self.area_h = h
         self.center = (x + w // 2, y + h // 2)
         # parkir mouse di luar area potong (tidak di pojok kiri atas = tombol berhenti)

@@ -299,3 +299,27 @@ def test_f10_toggle_starts_with_saved_settings_and_stops(win, monkeypatch):
     assert "SELESAI" in info[-1], info[-1]
     assert sorted(i.filename for i in w.pkg.items) == [f"{c}-00{n}.png" for c in ("TIU", "TKP", "TWK")
                                                        for n in (1, 2, 3)]
+
+
+def test_point_pick_dialog_grid_preview(win, tmp_path):
+    from PySide6.QtCore import QPoint
+
+    from screenshot_manager.app import PointPickDialog
+    from tests.fake_browser import GRID, FakeBrowser
+
+    path = tmp_path / "ref.png"
+    FakeBrowser({1: 500}).grab().save(path)
+    dlg = PointPickDialog(win, str(path), ["1", "2", "bawah"], grid=(GRID["cols"], 45))
+    ok_btn = dlg.bb.button(dlg.bb.StandardButton.Ok)
+    x, y = GRID["first"]
+    for pts, expect_ok in [([(x, y), (x, y + GRID["dy"]), (x + GRID["dx"], y)], False),
+                           ([(x, y), (x + GRID["dx"], y), (x, y + GRID["dy"])], True)]:
+        dlg._reset()
+        dlg.canvas.points = [QPoint(*p) for p in pts]
+        dlg._upd()
+        assert ok_btn.isEnabled() is expect_ok, dlg.info.text()
+    assert "lingkaran biru 1–45" in dlg.info.text()
+    assert dlg.canvas.grid_nav is not None and dlg.canvas.grid_nav.grid_position(45) == (x + 4 * GRID["dx"],
+                                                                                      y + 8 * GRID["dy"])
+    dlg.show()
+    dlg.grab().save(str(tmp_path / "preview.png"))

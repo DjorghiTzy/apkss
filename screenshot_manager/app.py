@@ -141,11 +141,11 @@ BANNER_STYLES = {
 
 class CropCanvas(QWidget):
     """Menampilkan screenshot acuan; seret mouse untuk memilih area soal."""
-    MAX = QSize(1100, 640)
-
     def __init__(self, pixmap: QPixmap, rect: QRect | None = None):
         super().__init__()
         self.src = pixmap
+        geo = QApplication.primaryScreen().availableGeometry()   # sebesar mungkin agar mudah diklik
+        self.MAX = QSize(max(900, int(geo.width() * 0.94)), max(500, int(geo.height() * 0.78)))
         self.view = pixmap.scaled(self.MAX, Qt.KeepAspectRatio, Qt.SmoothTransformation) \
             if pixmap.width() > self.MAX.width() or pixmap.height() > self.MAX.height() else pixmap
         self.k = pixmap.width() / max(1, self.view.width())
@@ -238,6 +238,8 @@ class PointCanvas(CropCanvas):
         super().__init__(pixmap)
         self.count = count
         self.points: list[QPoint] = []
+        self.grid_nav: NavConfig | None = None    # pratinjau posisi nomor 1..n
+        self.grid_count = 0
 
     def mousePressEvent(self, e):
         if len(self.points) < self.count:
@@ -254,6 +256,16 @@ class PointCanvas(CropCanvas):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.drawPixmap(0, 0, self.view)
+        if self.grid_nav is not None and len(self.points) == 3:
+            p.setPen(QPen(QColor("#1f6feb"), 2))
+            f = p.font()
+            f.setBold(True)
+            p.setFont(f)
+            for n in range(1, self.grid_count + 1):
+                gx, gy = self.grid_nav.grid_position(n)
+                x, y = round(gx / self.k), round(gy / self.k)
+                p.drawEllipse(QPoint(x, y), 6, 6)
+                p.drawText(x + 7, y + 14, str(n))
         p.setPen(QPen(QColor("#ff2d55"), 3))
         for i, pt in enumerate(self.points, start=1):
             x, y = round(pt.x() / self.k), round(pt.y() / self.k)
@@ -262,11 +274,15 @@ class PointCanvas(CropCanvas):
 
 
 class PointPickDialog(QDialog):
-    def __init__(self, parent, image_path: str, prompts: list[str]):
+    def __init__(self, parent, image_path: str, prompts: list[str],
+                 grid: tuple[int, int] | None = None):
+        """grid=(kolom, jumlah nomor terbanyak): tampilkan pratinjau & validasi posisi grid."""
         super().__init__(parent)
         self.setWindowTitle("Tandai Posisi")
         self.prompts = prompts
+        self.grid = grid
         self.canvas = PointCanvas(QPixmap(image_path), len(prompts))
+        self.screen_size = (self.canvas.src.width(), self.canvas.src.height())
         self.canvas.on_change = self._upd
         self.info = QLabel()
         self.info.setStyleSheet("font-size:15px; font-weight:bold")
@@ -293,9 +309,27 @@ class PointPickDialog(QDialog):
     def _upd(self):
         n = len(self.canvas.points)
         done = n >= len(self.prompts)
-        self.info.setText("✔ Semua titik ditandai. Klik OK." if done
-                          else f"Klik {n + 1}/{len(self.prompts)}: {self.prompts[n]}")
-        self.bb.button(QDialogButtonBox.Ok).setEnabled(done)
+        ok = done
+        text = ("✔ Semua titik ditandai. Klik OK." if done
+                else f"Klik {n + 1}/{len(self.prompts)}: {self.prompts[n]}")
+        self.canvas.grid_nav = None
+        if self.grid and done:
+            cols, count = self.grid
+            pts = self.points()
+            nav = NavConfig(mode="grid", grid_first=pts[0], grid_second=pts[1], grid_below=pts[2], columns=cols)
+            problem = nav.grid_problem(count, self.screen_size)
+            self.canvas.grid_nav, self.canvas.grid_count = nav, count
+            if problem:
+                ok = False
+                text = f"⚠ {problem}. Klik “Ulang” lalu tandai lagi."
+            else:
+                text = (f"Cek: lingkaran biru 1–{count} harus tepat di atas tombol nomornya "
+                        f"({cols} kolom). Jika pas, klik OK; jika tidak, klik “Ulang”.")
+        self.canvas.update()
+        self.info.setText(text)
+        self.info.setStyleSheet("font-size:15px; font-weight:bold; color:%s" % ("#b00" if text.startswith("⚠")
+                                                                                 else "#000"))
+        self.bb.button(QDialogButtonBox.Ok).setEnabled(ok)
 
     def points(self) -> list[list[int]]:
         return [[p.x(), p.y()] for p in self.canvas.points]
@@ -368,6 +402,7 @@ class AutoCaptureDialog(QDialog):
         self.sp_cols.setMinimumSize(70, 28)
         self.sp_cols.setRange(1, 50)
         self.sp_cols.setValue(self.nav.columns)
+        self.sp_cols.valueChanged.connect(self._upd)
         self.lbl_cols = QLabel("Jumlah kolom grid:")
         self.btn_pos = QPushButton("Tandai Posisi di Layar…")
         self.btn_pos.clicked.connect(self._pick)
@@ -448,9 +483,15 @@ class AutoCaptureDialog(QDialog):
         self.btn_dd.setVisible(percat)
         self.btn_pos.setVisible(mode != "key")
         if mode == "grid":
-            ok = bool(self.nav.grid_first and self.nav.grid_second and self.nav.grid_below)
-            text = (("✔ Posisi Daftar Soal sudah ditandai." if ok else "⚠ Daftar Soal belum ditandai.")
-                    + " (tombol nomor 1, nomor 2, dan nomor tepat di bawah nomor 1)")
+            self.nav.columns = self.sp_cols.value()
+            c = self.win.settings["crop"] or {}
+            screen = tuple(c.get("screen") or (99999, 99999))
+            count = (max((sp.value() for sp in self.spins.values()), default=1) if self.nav.per_category
+                     else self._total())
+            problem = self.nav.grid_problem(max(1, count), screen)
+            ok = problem is None
+            text = ("✔ Posisi Daftar Soal sudah ditandai." if ok else f"⚠ Daftar Soal: {problem}.") \
+                + " (tombol nomor 1, nomor 2, dan nomor tepat di bawah nomor 1)"
             if percat:
                 cats = self._plan_cats()
                 miss = [c for c in cats if not self.nav.category_options.get(c)]
@@ -517,8 +558,12 @@ class AutoCaptureDialog(QDialog):
         prompts = (["tombol nomor 1 di Daftar Soal", "tombol nomor 2 (di kanan nomor 1)",
                     "tombol tepat di BAWAH nomor 1 (mis. nomor 6)"] if mode == "grid" else ["tombol “Berikutnya”"])
 
+        count = (max((sp.value() for sp in self.spins.values()), default=1) if self.chk_percat.isChecked()
+                 else self._total())
+
         def got(path):
-            dlg = PointPickDialog(self, path, prompts)
+            dlg = PointPickDialog(self, path, prompts,
+                                  grid=(self.sp_cols.value(), max(1, count)) if mode == "grid" else None)
             if dlg.exec() == QDialog.Accepted:
                 pts = dlg.points()
                 if mode == "grid":
