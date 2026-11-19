@@ -1,0 +1,86 @@
+"""Browser tiruan untuk menguji Tangkap Otomatis tanpa Windows."""
+import random
+
+from PIL import Image, ImageDraw
+
+SCREEN = (1366, 768)
+AREA = [300, 120, 760, 560]                    # area konten soal
+GRID = {"first": (1150, 200), "dx": 40, "dy": 36, "cols": 5}
+CROP = {"enabled": True, "rect": AREA, "screen": list(SCREEN)}
+
+
+def make_page(q: int, height: int) -> Image.Image:
+    rnd = random.Random(q)
+    page = Image.new("RGB", (AREA[2], height), "white")
+    d = ImageDraw.Draw(page)
+    d.rectangle([0, 0, AREA[2], 40], fill=(rnd.randint(0, 200), 80, 160))
+    d.text((10, 12), f"SOAL NOMOR {q}", fill="white")
+    for y in range(60, height - 20, 24):
+        d.text((12, y), f"q{q} baris {y} " + "w" * rnd.randint(3, 70), fill="black")
+    d.text((12, height - 18), f"AKHIR PEMBAHASAN {q}", fill="red")
+    return page
+
+
+class FakeBrowser:
+    def __init__(self, heights, px_per_notch=53, noise=False, stop_after_grabs=None, broken_nav=False):
+        self.pages = {q: make_page(q, h) for q, h in heights.items()}
+        self.q = 1
+        self.scroll_y = 0
+        self.px = px_per_notch
+        self.noise = noise
+        self.grabs = 0
+        self.stop_after = stop_after_grabs
+        self.broken_nav = broken_nav
+        self.clicks = []
+        self.mouse = (600, 400)
+
+    # Driver API
+    def grab(self):
+        self.grabs += 1
+        scr = Image.new("RGB", SCREEN, "#2b2b3b")
+        d = ImageDraw.Draw(scr)
+        d.rectangle([0, 0, SCREEN[0], 60], fill="#888")             # tab browser
+        page = self.pages[self.q]
+        part = page.crop((0, self.scroll_y, AREA[2], min(page.height, self.scroll_y + AREA[3])))
+        view = Image.new("RGB", (AREA[2], AREA[3]), "white")
+        view.paste(part, (0, 0))
+        if self.noise and self.scroll_y:                              # render sub-piksel
+            px = view.load()
+            for x in range(0, view.width, 7):
+                for y in range(0, view.height, 5):
+                    r, g, b = px[x, y]
+                    px[x, y] = (min(255, r + 1), g, max(0, b - 1))
+        scr.paste(view, (AREA[0], AREA[1]))
+        for n in range(1, 111):                                       # grid navigasi
+            row, col = divmod(n - 1, GRID["cols"])
+            x = GRID["first"][0] + col * GRID["dx"]
+            y = GRID["first"][1] + row * GRID["dy"]
+            if y < SCREEN[1] - 10:
+                d.rectangle([x - 12, y - 10, x + 12, y + 10], outline="white")
+        return scr
+
+    def move(self, x, y):
+        self.mouse = (x, y)
+
+    def click(self, x, y):
+        self.clicks.append((x, y))
+        col = round((x - GRID["first"][0]) / GRID["dx"])
+        row = round((y - GRID["first"][1]) / GRID["dy"])
+        n = row * GRID["cols"] + col + 1
+        if n in self.pages and not self.broken_nav:
+            self.q, self.scroll_y = n, 0
+
+    def scroll(self, x, y, notches):
+        assert AREA[0] <= x <= AREA[0] + AREA[2] and AREA[1] <= y <= AREA[1] + AREA[3]
+        max_y = max(0, self.pages[self.q].height - AREA[3])
+        self.scroll_y = min(max_y, max(0, self.scroll_y - notches * self.px))
+
+    def key(self, name):
+        if name == "right" and self.q + 1 in self.pages:
+            self.q, self.scroll_y = self.q + 1, 0
+
+    def stop_requested(self):
+        return self.stop_after is not None and self.grabs >= self.stop_after
+
+    def sleep(self, s):
+        pass

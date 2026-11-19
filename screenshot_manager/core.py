@@ -171,13 +171,38 @@ def _row_hashes(img: Image.Image) -> list[int]:
 
 
 def find_overlap(top: Image.Image, bottom: Image.Image, min_rows: int = MIN_OVERLAP_ROWS) -> int:
-    """Jumlah baris di bawah `top` yang identik dengan baris teratas `bottom`
-    (terjadi saat halaman di-scroll kurang dari satu layar). 0 jika tidak ada."""
+    """Jumlah baris di bawah `top` yang sama dengan baris teratas `bottom`
+    (terjadi saat halaman di-scroll kurang dari satu layar). 0 jika tidak ada.
+
+    Coba pencocokan persis dulu; jika gagal (mis. browser di-zoom sehingga
+    hasil render bergeser sub-piksel), pakai pencocokan toleran.
+    """
     if top.width != bottom.width:
         return 0
     ra, rb = _row_hashes(top), _row_hashes(bottom)
     for k in range(min(len(ra), len(rb)) - 1, min_rows - 1, -1):
         if ra[-k] == rb[0] and ra[-1] == rb[k - 1] and ra[-k:] == rb[:k]:
+            return k
+    return _fuzzy_overlap(top, bottom, min_rows)
+
+
+def _fuzzy_overlap(top: Image.Image, bottom: Image.Image, min_rows: int,
+                   sig_tol: float = 2.0, px_tol: int = 48, bad_frac: float = 0.002) -> int:
+    import numpy as np
+
+    a = np.asarray(top.convert("L"), dtype=np.int16)
+    b = np.asarray(bottom.convert("L"), dtype=np.int16)
+    h, w = min(a.shape[0], b.shape[0]), a.shape[1]
+    blocks = max(1, min(32, w // 8))
+    bw = w // blocks
+
+    def sig(m):
+        return m[:, :blocks * bw].reshape(m.shape[0], blocks, bw).mean(axis=2)
+    sa, sb = sig(a), sig(b)
+    for k in range(h - 1, min_rows - 1, -1):
+        if np.abs(sa[-k:] - sb[:k]).mean() >= sig_tol:
+            continue
+        if (np.abs(a[-k:] - b[:k]) > px_tol).mean() <= bad_frac:
             return k
     return 0
 

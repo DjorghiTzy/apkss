@@ -220,3 +220,40 @@ def test_full_screen_crop_and_parts(win, monkeypatch):
     assert w.table.item(0, 4).text() == "3"
     w.remove_last_part()
     assert item.parts == 2 and w.table.item(0, 4).text() == "2"
+
+
+def test_grab_button_and_auto_capture_in_window(win, monkeypatch):
+    from screenshot_manager.autocapture import NavConfig, Plan
+    from tests.fake_browser import CROP, GRID, FakeBrowser
+
+    w = win
+    b = FakeBrowser({1: 700, 2: 1600, 3: 500, 4: 1200, 5: 600}, px_per_notch=60)
+    b.q = 5                                   # halaman lain untuk tes Ambil Layar
+    w.screen_grabber = b.grab
+    w.driver_factory = lambda: b
+    w.settings["crop"] = dict(CROP)
+    w._refresh_crop_label()
+    info = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a[2]))
+
+    # tombol Ambil Layar: jendela sembunyi, layar dipotret, diproses seperti biasa
+    w.select_category("TKP")
+    w.set_number(9)
+    w.arm()
+    w._hidden_grab(lambda p: (w.handle_incoming(p, "ambil layar"), Path(p).unlink()), delay_ms=0)
+    assert wait_until(lambda: w.pkg.find_slot("TKP", 9) is not None)
+    assert w.isVisible() and "(dipotong)" in w.banner.text()
+
+    # Tangkap Otomatis 4 soal lewat grid
+    x, y = GRID["first"]
+    nav = NavConfig(mode="grid", grid_first=[x, y], grid_second=[x + GRID["dx"], y],
+                    grid_below=[x, y + GRID["dy"]], columns=GRID["cols"])
+    w.start_auto_capture(Plan(sections=[["TWK", 2], ["TIU", 2]]), nav, 0.0, delay_ms=0)
+    assert w.auto_running and not w.centralWidget().isEnabled()
+    assert wait_until(lambda: not w.auto_running, timeout=120)
+    assert info and "SELESAI" in info[0], info
+    assert w.centralWidget().isEnabled() and w.watcher.active
+    names_now = sorted(i.filename for i in w.pkg.items)
+    assert names_now == ["TIU-001.png", "TIU-002.png", "TKP-009.png", "TWK-001.png", "TWK-002.png"]
+    assert w.pkg.find_slot("TWK", 2).height == 1600
+    assert w.table.rowCount() == 5

@@ -13,7 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPen,
                            QKeySequence, QPixmap)
-from PySide6.QtWidgets import (QProgressDialog, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
+from PySide6.QtWidgets import (QProgressDialog, QDoubleSpinBox, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
                                QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
                                QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -24,7 +24,8 @@ from PySide6.QtWidgets import (QProgressDialog, QAbstractItemView, QApplication,
 from . import __version__
 from .core import (DuplicateImageError, IMAGE_EXTS, Item, ManagerError, Package,
                    SlotTakenError, list_packages, make_filename, sanitize_package_name)
-from . import updater
+from . import updater, win_input
+from .autocapture import AutoCapture, AutoCaptureError, NavConfig, Plan, RunConfig
 from .watcher import FolderWatcher
 
 APP_NAME = "Screenshot Manager"
@@ -230,6 +231,284 @@ class CropDialog(QDialog):
         return {"enabled": True, "rect": [r.x(), r.y(), r.width(), r.height()], "screen": self.screen}
 
 
+class PointCanvas(CropCanvas):
+    """Klik untuk menandai titik (posisi tombol) di screenshot acuan."""
+
+    def __init__(self, pixmap: QPixmap, count: int):
+        super().__init__(pixmap)
+        self.count = count
+        self.points: list[QPoint] = []
+
+    def mousePressEvent(self, e):
+        if len(self.points) < self.count:
+            self.points.append(self._img_point(e.position().toPoint()))
+            self.update()
+            self.on_change()
+
+    def mouseMoveEvent(self, e):
+        pass
+
+    def mouseReleaseEvent(self, e):
+        pass
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.drawPixmap(0, 0, self.view)
+        p.setPen(QPen(QColor("#ff2d55"), 3))
+        for i, pt in enumerate(self.points, start=1):
+            x, y = round(pt.x() / self.k), round(pt.y() / self.k)
+            p.drawEllipse(QPoint(x, y), 9, 9)
+            p.drawText(x + 12, y - 8, str(i))
+
+
+class PointPickDialog(QDialog):
+    def __init__(self, parent, image_path: str, prompts: list[str]):
+        super().__init__(parent)
+        self.setWindowTitle("Tandai Posisi")
+        self.prompts = prompts
+        self.canvas = PointCanvas(QPixmap(image_path), len(prompts))
+        self.canvas.on_change = self._upd
+        self.info = QLabel()
+        self.info.setStyleSheet("font-size:15px; font-weight:bold")
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.info)
+        lay.addWidget(self.canvas, 0, Qt.AlignCenter)
+        row = QHBoxLayout()
+        b_reset = QPushButton("Ulang")
+        b_reset.clicked.connect(self._reset)
+        self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.bb.accepted.connect(self.accept)
+        self.bb.rejected.connect(self.reject)
+        row.addWidget(b_reset)
+        row.addStretch(1)
+        row.addWidget(self.bb)
+        lay.addLayout(row)
+        self._upd()
+
+    def _reset(self):
+        self.canvas.points.clear()
+        self.canvas.update()
+        self._upd()
+
+    def _upd(self):
+        n = len(self.canvas.points)
+        done = n >= len(self.prompts)
+        self.info.setText("✔ Semua titik ditandai. Klik OK." if done
+                          else f"Klik {n + 1}/{len(self.prompts)}: {self.prompts[n]}")
+        self.bb.button(QDialogButtonBox.Ok).setEnabled(done)
+
+    def points(self) -> list[list[int]]:
+        return [[p.x(), p.y()] for p in self.canvas.points]
+
+
+NAV_MODES = [("grid", "Klik nomor soal di grid navigasi (disarankan)"),
+             ("point", "Klik tombol “Berikutnya” (posisi tetap)"),
+             ("key", "Tekan tombol keyboard → (panah kanan)")]
+
+
+class AutoCaptureDialog(QDialog):
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle("Tangkap Otomatis — semua soal + pembahasan")
+        self.setMinimumWidth(620)
+        saved = win.settings["auto"] or {}
+        self.nav = NavConfig(**{k: v for k, v in (saved.get("nav") or {}).items()
+                                if k in NavConfig.__dataclass_fields__})
+        counts = dict(saved.get("sections") or [["TWK", 30], ["TIU", 35], ["TKP", 45]])
+        lay = QVBoxLayout(self)
+
+        g_plan = QGroupBox("1. Rencana soal (urutan sama dengan website)")
+        fp = QFormLayout(g_plan)
+        self.spins = {}
+        for cat in win.pkg.categories:
+            sp = QSpinBox()
+            sp.setMinimumSize(90, 28)
+            sp.setRange(0, 500)
+            sp.setValue(int(counts.get(cat, 0)))
+            sp.valueChanged.connect(self._upd)
+            self.spins[cat] = sp
+            fp.addRow(f"Jumlah soal {cat}", sp)
+        self.rb_local = QRadioButton("Nomor per kategori (TWK-001…030, TIU-001…035, TKP-001…045)")
+        self.rb_global = QRadioButton("Nomor global (TWK-001…030, TIU-031…065, TKP-066…110)")
+        (self.rb_global if saved.get("global") else self.rb_local).setChecked(True)
+        self.rb_local.toggled.connect(self._upd)
+        fp.addRow(self.rb_local)
+        fp.addRow(self.rb_global)
+        hr = QHBoxLayout()
+        self.sp_start, self.sp_end = QSpinBox(), QSpinBox()
+        for sp in (self.sp_start, self.sp_end):
+            sp.setMinimumSize(80, 28)
+            sp.setRange(1, 2000)
+            sp.valueChanged.connect(self._upd)
+        hr.addWidget(QLabel("Dari soal ke"))
+        hr.addWidget(self.sp_start)
+        hr.addWidget(QLabel("sampai"))
+        hr.addWidget(self.sp_end)
+        hr.addStretch(1)
+        fp.addRow(hr)
+        lay.addWidget(g_plan)
+
+        g_nav = QGroupBox("2. Cara pindah soal")
+        vn = QVBoxLayout(g_nav)
+        self.cb_nav = QComboBox()
+        for key, label in NAV_MODES:
+            self.cb_nav.addItem(label, key)
+        self.cb_nav.setCurrentIndex([k for k, _ in NAV_MODES].index(self.nav.mode))
+        self.cb_nav.currentIndexChanged.connect(self._upd)
+        vn.addWidget(self.cb_nav)
+        hn = QHBoxLayout()
+        self.sp_cols = QSpinBox()
+        self.sp_cols.setMinimumSize(70, 28)
+        self.sp_cols.setRange(1, 50)
+        self.sp_cols.setValue(self.nav.columns)
+        self.lbl_cols = QLabel("Jumlah kolom grid:")
+        self.btn_pos = QPushButton("Tandai Posisi di Layar…")
+        self.btn_pos.clicked.connect(self._pick)
+        hn.addWidget(self.lbl_cols)
+        hn.addWidget(self.sp_cols)
+        hn.addStretch(1)
+        hn.addWidget(self.btn_pos)
+        vn.addLayout(hn)
+        self.lbl_nav = QLabel()
+        self.lbl_nav.setWordWrap(True)
+        vn.addWidget(self.lbl_nav)
+        lay.addWidget(g_nav)
+
+        g_opt = QGroupBox("3. Lain-lain")
+        fo = QFormLayout(g_opt)
+        self.sp_wait = QDoubleSpinBox()
+        self.sp_wait.setRange(0.3, 15)
+        self.sp_wait.setSingleStep(0.5)
+        self.sp_wait.setValue(float(saved.get("wait_load", 1.5)))
+        self.sp_wait.setSuffix(" detik")
+        fo.addRow("Tunggu halaman dimuat", self.sp_wait)
+        self.lbl_crop = QLabel()
+        self.lbl_crop.setWordWrap(True)
+        fo.addRow("Area potong", self.lbl_crop)
+        lay.addWidget(g_opt)
+
+        tip = QLabel("<b>Sebelum mulai:</b> buka halaman <u>pembahasan</u> tryout di browser (layar penuh), "
+                     "pastikan grid nomor soal terlihat. Aplikasi akan bersembunyi, lalu mengklik, scroll, dan "
+                     "memotret sendiri. Jangan sentuh mouse/keyboard selama berjalan.<br>"
+                     "<b>Berhenti kapan saja:</b> tekan <b>ESC</b> atau geser mouse ke <b>pojok kiri atas</b> layar.")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("background:#fff1c9; padding:8px; border-radius:6px")
+        lay.addWidget(tip)
+
+        self.lbl_summary = QLabel()
+        self.lbl_summary.setStyleSheet("font-weight:bold")
+        lay.addWidget(self.lbl_summary)
+        bb = QDialogButtonBox()
+        self.btn_start = bb.addButton("MULAI TANGKAP OTOMATIS", QDialogButtonBox.AcceptRole)
+        self.btn_start.setStyleSheet("font-weight:bold; background:#1f6feb; color:white; padding:8px 16px")
+        bb.addButton("Tutup", QDialogButtonBox.RejectRole)
+        bb.accepted.connect(self._start)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+        self.sp_start.setValue(1)
+        self.sp_end.setValue(max(1, self._total()))
+        self._upd()
+
+    def _total(self) -> int:
+        return sum(sp.value() for sp in self.spins.values())
+
+    def plan(self) -> Plan:
+        return Plan(sections=[[c, sp.value()] for c, sp in self.spins.items() if sp.value()],
+                    start=self.sp_start.value(), end=self.sp_end.value(),
+                    global_numbering=self.rb_global.isChecked())
+
+    def _upd(self):
+        mode = self.cb_nav.currentData()
+        self.nav.mode = mode
+        self.sp_cols.setVisible(mode == "grid")
+        self.lbl_cols.setVisible(mode == "grid")
+        self.btn_pos.setVisible(mode != "key")
+        if mode == "grid":
+            ok = bool(self.nav.grid_first and self.nav.grid_second and self.nav.grid_below)
+            self.lbl_nav.setText(("✔ Posisi grid sudah ditandai." if ok else "⚠ Belum ditandai.")
+                                 + " Tandai tombol nomor 1, nomor 2, dan nomor tepat di bawah nomor 1.")
+        elif mode == "point":
+            self.lbl_nav.setText(("✔ Posisi tombol sudah ditandai." if self.nav.point else "⚠ Belum ditandai.")
+                                 + " Tombol harus terlihat di posisi yang sama setelah halaman di-scroll ke atas. "
+                                 "Soal pertama harus sudah terbuka.")
+        else:
+            self.lbl_nav.setText("Soal pertama harus sudah terbuka. Pastikan panah kanan berpindah soal di website.")
+        c = self.win.settings["crop"] or {}
+        self.lbl_crop.setText(f"✔ {c['rect'][2]}×{c['rect'][3]}px untuk layar {c['screen'][0]}×{c['screen'][1]}"
+                              if c.get("rect") and c.get("screen")
+                              else "⚠ Belum diatur — tutup dialog ini, klik “Atur Area…”")
+        total = self._total()
+        self.sp_start.setMaximum(max(1, total))
+        self.sp_end.setMaximum(max(1, total))
+        entries = self.plan().entries() if total else []
+        if entries:
+            f = entries[0]
+            l = entries[-1]
+            self.lbl_summary.setText(f"{len(entries)} soal: {f[1]}-{f[2]:03d} … {l[1]}-{l[2]:03d} "
+                                     f"(perkiraan {max(1, round(len(entries) * 6 / 60))}–"
+                                     f"{max(2, round(len(entries) * 12 / 60))} menit)")
+        else:
+            self.lbl_summary.setText("Rencana kosong")
+
+    def _pick(self):
+        mode = self.cb_nav.currentData()
+        prompts = (["tombol nomor 1", "tombol nomor 2 (di kanan nomor 1)",
+                    "tombol tepat di BAWAH nomor 1"] if mode == "grid" else ["tombol “Berikutnya”"])
+
+        def got(path):
+            dlg = PointPickDialog(self, path, prompts)
+            if dlg.exec() == QDialog.Accepted:
+                pts = dlg.points()
+                if mode == "grid":
+                    self.nav.grid_first, self.nav.grid_second, self.nav.grid_below = pts
+                else:
+                    self.nav.point = pts[0]
+                self._save()
+            self._upd()
+        self.win.grab_reference(got, hide=[self])
+
+    def _save(self):
+        self.nav.columns = self.sp_cols.value()
+        self.nav.mode = self.cb_nav.currentData()
+        from dataclasses import asdict
+        self.win.settings["auto"] = {
+            "sections": [[c, sp.value()] for c, sp in self.spins.items()],
+            "global": self.rb_global.isChecked(), "nav": asdict(self.nav),
+            "wait_load": self.sp_wait.value()}
+
+    def _start(self):
+        self._save()
+        try:
+            self.nav.validate()
+        except AutoCaptureError as exc:
+            QMessageBox.warning(self, "Tangkap Otomatis", str(exc))
+            return
+        c = self.win.settings["crop"] or {}
+        if not (c.get("rect") and c.get("screen")):
+            QMessageBox.warning(self, "Tangkap Otomatis", "Atur area potong dulu (tombol “Atur Area…”).")
+            return
+        if not self.plan().entries():
+            QMessageBox.warning(self, "Tangkap Otomatis", "Rencana soal kosong.")
+            return
+        self.accept()
+
+
+class AutoWorker(QObject):
+    progress = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def start(self, runner: AutoCapture):
+        def run():
+            try:
+                self.finished.emit(runner.run())
+            except Exception as exc:  # noqa: BLE001
+                self.failed.emit(f"{type(exc).__name__}: {exc}")
+        threading.Thread(target=run, daemon=True).start()
+
+
 class UpdateWorker(QObject):
     """Menjalankan cek/unduh update di thread terpisah agar UI tidak macet."""
     checked = Signal(object, bool)      # ReleaseInfo, silent
@@ -280,6 +559,10 @@ class MainWindow(QMainWindow):
         self.append_target: str | None = None              # id item untuk "Tambah Bagian"
         self.append_prev_armed = False
         self.waiting_crop_reference = False
+        self.auto_running = False
+        self.auto_worker: AutoWorker | None = None
+        self.screen_grabber = win_input.grab_screen if win_input.available() else None
+        self.driver_factory = win_input.WindowsDriver if win_input.available() else None
         self.last_item_id: str | None = None
         self._thumbs: dict[str, QPixmap] = {}
         self._loading = False
@@ -463,6 +746,20 @@ class MainWindow(QMainWindow):
         self.btn_append.setShortcut(QKeySequence("Ctrl+B"))
         self.btn_append.clicked.connect(self.append_next)
         lay.addWidget(self.btn_append)
+        self.btn_grab = QPushButton("📷 Ambil Layar")
+        self.btn_grab.setToolTip("Aplikasi bersembunyi sebentar lalu memotret layar penuh "
+                                 "(sama seperti Win+PrtScn). Ctrl+Shift+S")
+        self.btn_grab.setMinimumHeight(40)
+        self.btn_grab.setStyleSheet("font-size:14px; font-weight:bold")
+        self.btn_grab.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.btn_grab.clicked.connect(self.grab_now)
+        lay.addWidget(self.btn_grab)
+        self.btn_auto = QPushButton("⚡ TANGKAP OTOMATIS…")
+        self.btn_auto.setMinimumHeight(48)
+        self.btn_auto.setStyleSheet("font-size:15px; font-weight:bold; background:#6f42c1; color:white;"
+                                    "border-radius:6px;")
+        self.btn_auto.clicked.connect(self.open_auto_capture)
+        lay.addWidget(self.btn_auto)
         grid = QGridLayout()
         btn_cancel = QPushButton("Batalkan")
         btn_cancel.setShortcut(QKeySequence("Esc"))
@@ -482,7 +779,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(btn_addcat, 1, 1)
         lay.addLayout(grid)
 
-        g_crop = QGroupBox("Potong otomatis (screenshot layar penuh Win+PrtScn)")
+        g_crop = QGroupBox("Area potong (soal + pembahasan)")
         vc = QVBoxLayout(g_crop)
         hc = QHBoxLayout()
         self.chk_crop = QCheckBox("Aktif")
@@ -498,6 +795,13 @@ class MainWindow(QMainWindow):
         vc.addWidget(self.lbl_crop)
         lay.addWidget(g_crop)
         lay.addStretch(1)
+        # urutan: Paket -> Tangkap Otomatis -> Area potong -> kontrol manual
+        for i, wdg in enumerate((self.btn_auto, g_crop), start=1):
+            lay.removeWidget(wdg)
+            lay.insertWidget(i, wdg)
+        lbl_manual = QLabel("<b>Manual / per soal</b>")
+        lbl_manual.setStyleSheet("margin-top:6px")
+        lay.insertWidget(3, lbl_manual)
         return panel
 
     def _build_list_panel(self) -> QWidget:
@@ -941,14 +1245,18 @@ class MainWindow(QMainWindow):
     def setup_crop(self):
         box = QMessageBox(self)
         box.setWindowTitle("Atur Area Potong")
-        box.setText("Butuh satu screenshot layar penuh sebagai acuan.\n\n"
-                    "Klik “Tunggu Screenshot”, buka halaman soal di browser, lalu tekan Win+PrtScn. "
-                    "Screenshot acuan itu tidak dimasukkan ke daftar.")
+        box.setText("Butuh satu screenshot layar penuh sebagai acuan (halaman soal terbuka di browser).\n\n"
+                    "• Ambil Layar Acuan: aplikasi bersembunyi 1 detik lalu memotret layar.\n"
+                    "• Tunggu Screenshot: tekan Win+PrtScn sendiri.\n"
+                    "Screenshot acuan tidak dimasukkan ke daftar.")
+        b_self = box.addButton("Ambil Layar Acuan", QMessageBox.YesRole) if self.screen_grabber else None
         b_wait = box.addButton("Tunggu Screenshot", QMessageBox.AcceptRole)
         b_file = box.addButton("Pilih File…", QMessageBox.ActionRole)
         box.addButton("Batal", QMessageBox.RejectRole)
         box.exec()
-        if box.clickedButton() is b_wait:
+        if b_self is not None and box.clickedButton() is b_self:
+            self.grab_reference(self._open_crop_dialog)
+        elif box.clickedButton() is b_wait:
             self.waiting_crop_reference = True
             self.set_banner("Menunggu screenshot acuan — tekan Win+PrtScn di halaman soal.", "info")
         elif box.clickedButton() is b_file:
@@ -968,6 +1276,105 @@ class MainWindow(QMainWindow):
             self.log_event(f"Area potong: {self.settings['crop']}", "ok")
         else:
             self.set_banner("Pengaturan area potong dibatalkan.", "warn")
+
+    # ============================================================ ambil layar
+    def _hidden_grab(self, done, hide=(), delay_ms: int = 900):
+        """Sembunyikan jendela, potret layar, tampilkan lagi, lalu panggil done(path)."""
+        if self.screen_grabber is None:
+            return self.error("Ambil layar otomatis hanya tersedia di Windows. Pakai Win+PrtScn.")
+        windows = [self, *hide]
+        for w in windows:
+            w.hide()
+
+        def shoot():
+            err = None
+            path = None
+            try:
+                img = self.screen_grabber()
+                d = self.pkg.root / "_tangkapan"
+                d.mkdir(exist_ok=True)
+                path = d / f"layar-{datetime.now():%Y%m%d-%H%M%S-%f}.png"
+                img.save(path, "PNG")
+            except Exception as exc:  # noqa: BLE001
+                err = exc
+            for w in reversed(windows):
+                w.show()
+            self.raise_()
+            if path is None:
+                return self.error(f"Gagal memotret layar: {err}")
+            done(str(path))
+        QTimer.singleShot(delay_ms, shoot)
+
+    def grab_now(self):
+        def done(path):
+            self.handle_incoming(path, "ambil layar")
+            Path(path).unlink(missing_ok=True)
+        self._hidden_grab(done)
+
+    def grab_reference(self, callback, hide=()):
+        def done(path):
+            try:
+                callback(path)
+            finally:
+                Path(path).unlink(missing_ok=True)
+        self._hidden_grab(done, hide=hide)
+
+    def open_auto_capture(self):
+        if self.driver_factory is None:
+            return self.error("Tangkap Otomatis hanya tersedia di Windows.")
+        dlg = AutoCaptureDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.start_auto_capture(dlg.plan(), dlg.nav, dlg.sp_wait.value())
+
+    def start_auto_capture(self, plan: Plan, nav: NavConfig, wait_load: float, delay_ms: int = 1200):
+        cfg = RunConfig(crop=dict(self.settings["crop"]), nav=nav, wait_load=wait_load)
+        self.auto_worker = AutoWorker(self)
+        try:
+            runner = AutoCapture(self.pkg, plan, cfg, self.driver_factory(), self.auto_worker.progress.emit)
+        except AutoCaptureError as exc:
+            return self.error(str(exc))
+        self.disarm(silent=True)
+        self.auto_running = True
+        self.watcher.stop()
+        self.centralWidget().setEnabled(False)
+        self.log_event(f"Tangkap Otomatis dimulai: {len(plan.entries())} soal", "ok")
+        self.auto_worker.progress.connect(self._on_auto_progress)
+        self.auto_worker.finished.connect(self._on_auto_finished)
+        self.auto_worker.failed.connect(lambda m: self._on_auto_finished(None, m))
+        self.showMinimized()
+        QTimer.singleShot(delay_ms, lambda: self.auto_worker.start(runner))
+
+    def _on_auto_progress(self, msg: str):
+        self.log_event(msg)
+        self.setWindowTitle(f"{APP_NAME} — OTOMATIS {msg.strip()[:60]}")
+
+    def _on_auto_finished(self, rep, crash: str | None = None):
+        self.auto_running = False
+        self.centralWidget().setEnabled(True)
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self.watcher.start(self.ed_folder.text(), reset=False)
+        self._thumbs.clear()
+        self.refresh_table()
+        if rep is None:
+            self.error(f"Tangkap Otomatis berhenti karena kesalahan: {crash}")
+            return
+        status = ("dihentikan (ESC / pojok layar)" if rep.stopped else
+                  f"BERHENTI: {rep.aborted}" if rep.aborted else "SELESAI")
+        kind = "ok" if not rep.aborted and not rep.stopped else "warn"
+        self.set_banner(f"Tangkap Otomatis {status} — {len(rep.done)} soal tersimpan"
+                        + (f", {len(rep.problems)} perlu dicek" if rep.problems else ""), kind)
+        self.log_event(f"Tangkap Otomatis {status}: {len(rep.done)} soal", kind)
+        for name, msg in rep.problems:
+            self.log_event(f"Perlu dicek {name}: {msg}", "warn")
+        text = f"Status: {status}\nTersimpan: {len(rep.done)} soal"
+        if rep.done:
+            text += f" ({rep.done[0]} … {rep.done[-1]})"
+        if rep.problems:
+            text += "\n\nPerlu dicek:\n" + "\n".join(f"• {n}: {m}" for n, m in rep.problems[:25])
+        QMessageBox.information(self, "Tangkap Otomatis", text)
 
     # ============================================================ sources
     def _on_watch_status(self, active: bool, msg: str):

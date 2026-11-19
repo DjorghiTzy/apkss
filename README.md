@@ -35,6 +35,32 @@ Tidak butuh hak admin; terpasang di `%LOCALAPPDATA%\Programs\ScreenshotManager`.
 
 Judul jendela juga menunjukkan status, mis. `Screenshot Manager — SIAP: TWK-005.png [Paket-01]`.
 
+## ⚡ Tangkap Otomatis (semua soal sekaligus)
+
+Aplikasi mengerjakan semuanya sendiri: klik nomor soal di website, scroll ke atas, potret,
+scroll ke bawah sambil memotret dan menyambung sampai pembahasan habis, lalu lanjut ke soal
+berikutnya. Kategori & nomor mengikuti rencana yang Anda isi (bukan OCR/AI). Aplikasi hanya
+menggerakkan mouse/keyboard seperti pengguna; tidak menyentuh login, cookie, atau data browser.
+
+1. Di browser: buka halaman **pembahasan** tryout, layar penuh, grid nomor soal terlihat.
+   Perkecil zoom (Ctrl+−) bila perlu.
+2. Screenshot Manager → **Atur Area…** → **Ambil Layar Acuan** → seret kotak menutupi area konten
+   soal (tanpa grid nomor, tab browser, taskbar, dan header yang menempel saat di-scroll) → OK.
+3. **⚡ TANGKAP OTOMATIS…** → isi jumlah soal (TWK 30, TIU 35, TKP 45), pilih penomoran,
+   pilih cara pindah soal (disarankan: grid nomor soal) → **Tandai Posisi di Layar…** → klik
+   tombol nomor 1, nomor 2, dan nomor tepat di bawah nomor 1 → isi jumlah kolom grid.
+4. **MULAI TANGKAP OTOMATIS**. Jangan sentuh mouse/keyboard. Berhenti kapan saja dengan **ESC**
+   atau menggeser mouse ke **pojok kiri atas**. Perkiraan 6–12 detik per soal.
+5. Setelah selesai, jendela muncul lagi dengan laporan; cek baris yang "perlu dicek", lalu
+   **BUAT ZIP**.
+
+Menjalankan ulang melanjutkan dari yang belum ada: soal yang sudah tersimpan dilewati, soal yang
+terpotong saat dihentikan dibuang dan diambil ulang utuh. Navigasi gagal (halaman tidak
+berganti) menghentikan proses dengan pesan yang jelas, tidak menimpa apa pun.
+
+Tombol **📷 Ambil Layar** (Ctrl+Shift+S) memotret satu layar penuh seperti Win+PrtScn, untuk
+pemakaian per soal.
+
 ## Alur kerja Claude (soal + pembahasan lengkap)
 
 **Sekali di awal: atur area potong**
