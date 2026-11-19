@@ -4,8 +4,10 @@ name: Build Windows
 #  - GitHub web: Actions -> Build Windows -> Run workflow (centang "Terbitkan release")
 #  - Push tag vX.Y.Z
 # Versi diambil dari screenshot_manager/__init__.py (__version__).
+#  - Push biasa ke main hanya tes + build (tanpa release), hasil di Artifacts.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:

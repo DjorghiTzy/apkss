@@ -72,20 +72,10 @@ def test_fetch_latest_errors(monkeypatch):
         updater.fetch_latest()
 
 
-def test_ui_update_flow(tmp_path, monkeypatch):
+def test_ui_update_flow(isolated_home, monkeypatch):
     """Tombol Periksa Update -> dialog muncul untuk versi lebih baru."""
-    import json
     import time
     from PySide6.QtWidgets import QApplication, QMessageBox
-    home = tmp_path / "home"
-    (home / "Pictures" / "Screenshots").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
-    cfg = home / ".config" / "ScreenshotManager"
-    cfg.mkdir(parents=True)
-    (cfg / "settings.json").write_text(json.dumps({
-        "watch_folder": str(home / "Pictures" / "Screenshots"),
-        "workspace": str(home / "ws"), "auto_update_check": False}))
     app = QApplication.instance() or QApplication([])
     from screenshot_manager.app import MainWindow
 

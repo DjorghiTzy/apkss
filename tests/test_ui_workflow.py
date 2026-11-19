@@ -42,24 +42,16 @@ def wait_until(cond, timeout=8.0):
 
 
 @pytest.fixture
-def win(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    shots = home / "Pictures" / "Screenshots"
-    shots.mkdir(parents=True)
+def win(isolated_home, monkeypatch):
+    home, shots = isolated_home
     Image.new("RGB", (10, 10), "gray").save(shots / "old-existing.png")  # file lama: diabaikan
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
-    cfg = home / ".config" / "ScreenshotManager"
-    cfg.mkdir(parents=True)
-    (cfg / "settings.json").write_text(json.dumps({"watch_folder": str(shots),
-                                                   "workspace": str(home / "ws"),
-                                                   "auto_update_check": False}))
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
     app = QApplication.instance() or QApplication([])
     from screenshot_manager.app import MainWindow
     w = MainWindow()
     w.show()
+    assert Path(w.ed_folder.text()) == shots
     w._shots = shots
     yield w
     w.close()
