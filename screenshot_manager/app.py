@@ -1756,6 +1756,13 @@ def main() -> int:
     app.setApplicationVersion(__version__)
     app.setQuitOnLastWindowClosed(True)
     app.setStyle("Fusion")
+    # selalu tema terang: warna status/log dirancang untuk latar terang (mode gelap Windows
+    # membuat teks log & nama target sulit dibaca)
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except AttributeError:   # Qt < 6.8
+        pass
+    app.setPalette(app.style().standardPalette())
     icon_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "assets" / "icon.ico"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
