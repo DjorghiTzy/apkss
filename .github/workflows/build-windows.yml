@@ -1,11 +1,18 @@
 name: Build Windows
 
-# Push tag vX.Y.Z  -> build, tes, buat installer, lalu terbitkan GitHub Release
-# Jalankan manual (workflow_dispatch) -> build saja, hasil di Artifacts
+# Cara rilis (pilih salah satu):
+#  - GitHub web: Actions -> Build Windows -> Run workflow (centang "Terbitkan release")
+#  - Push tag vX.Y.Z
+# Versi diambil dari screenshot_manager/__init__.py (__version__).
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Terbitkan GitHub Release (vX.Y.Z dari __version__)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -30,6 +37,18 @@ jobs:
             Write-Error "Tag $env:GITHUB_REF_NAME tidak sama dengan __version__ ($v). Jalankan tools/bump_version.py dulu."
             exit 1
           }
+          $publish = ($env:GITHUB_REF_TYPE -eq "tag") -or ("${{ inputs.release }}" -eq "true")
+          "publish=$publish" >> $env:GITHUB_OUTPUT
+          if ($publish -and $env:GITHUB_REF_TYPE -ne "tag") {
+            gh release view "v$v" *> $null
+            if ($LASTEXITCODE -eq 0) {
+              Write-Error "Release v$v sudah ada. Naikkan versi dengan tools/bump_version.py."
+              exit 1
+            }
+            $global:LASTEXITCODE = 0
+          }
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Install dependencies
         run: python -m pip install -r requirements.txt pyinstaller pytest
@@ -61,12 +80,12 @@ jobs:
             dist/ScreenshotManager-Setup-*.exe
 
       - name: Terbitkan GitHub Release
-        if: github.ref_type == 'tag'
+        if: steps.ver.outputs.publish == 'True'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$env:GITHUB_REF_NAME" `
+          gh release create "v${{ steps.ver.outputs.version }}" --target "$env:GITHUB_SHA" `
             "dist\ScreenshotManager-Setup-${{ steps.ver.outputs.version }}.exe" `
             "dist\ScreenshotManager-${{ steps.ver.outputs.version }}-portable.zip" `
             --title "Screenshot Manager ${{ steps.ver.outputs.version }}" --generate-notes

@@ -114,12 +114,14 @@ otomatis; jika tidak, pilih lewat **Ganti Folder…**.
 
 ### Menerbitkan versi baru
 
-```
-python tools/bump_version.py 1.0.1
-git commit -am "Rilis v1.0.1"
-git tag v1.0.1
-git push --follow-tags
-```
+1. Naikkan versi lalu push ke `main`:
+   ```
+   python tools/bump_version.py 1.0.1
+   git commit -am "Rilis v1.0.1"
+   git push
+   ```
+2. Di GitHub: **Actions → Build Windows → Run workflow** (biarkan "Terbitkan release" tercentang).
+   Cara lain: push tag `v1.0.1`.
 
 GitHub Actions lalu menjalankan tes, membuild `.exe` + installer, dan menerbitkan GitHub Release
 `v1.0.1` berisi `ScreenshotManager-Setup-1.0.1.exe` dan versi portable. Semua aplikasi yang
