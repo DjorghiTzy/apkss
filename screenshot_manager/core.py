@@ -1,0 +1,476 @@
+"""Logika inti Screenshot Manager (tanpa UI).
+
+Workspace satu paket:
+    <workspace_root>/<Paket>/
+        paket.json            -> state paket (daftar item + pengaturan capture)
+        TWK/TWK-001.png       -> salinan yang sudah diberi nama
+        TIU/TIU-001.png
+        _belum/<id>.png       -> screenshot yang masuk tanpa metadata
+        _diganti/...          -> cadangan salinan yang tergantikan
+
+File screenshot asli TIDAK pernah diubah, dipindah, atau dihapus.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import tempfile
+import uuid
+import zipfile
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from PIL import Image
+
+DEFAULT_CATEGORIES = ["TWK", "TIU", "TKP"]
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+UNASSIGNED_DIR = "_belum"
+REPLACED_DIR = "_diganti"
+STATE_FILE = "paket.json"
+STATE_VERSION = 1
+
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                 *(f"LPT{i}" for i in range(1, 10))}
+
+
+class ManagerError(Exception):
+    """Kesalahan yang aman ditampilkan ke pengguna."""
+
+
+class DuplicateImageError(ManagerError):
+    def __init__(self, existing: "Item"):
+        self.existing = existing
+        super().__init__(f"Gambar duplikat: sama dengan {existing.display_name}")
+
+
+class SlotTakenError(ManagerError):
+    def __init__(self, occupant: "Item"):
+        self.occupant = occupant
+        super().__init__(f"{occupant.filename} sudah dipakai oleh gambar lain")
+
+
+# ---------------------------------------------------------------- helpers
+
+def is_image_path(path: str | os.PathLike) -> bool:
+    p = Path(path)
+    name = p.name
+    if name.startswith(("~", ".")) or name.lower().endswith((".tmp", ".crdownload", ".part")):
+        return False
+    return p.suffix.lower() in IMAGE_EXTS
+
+
+def sanitize_package_name(name: str) -> str:
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", (name or "").strip())
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    if not name:
+        raise ManagerError("Nama paket tidak boleh kosong")
+    if name.upper() in _WIN_RESERVED or name.startswith("_"):
+        raise ManagerError(f"Nama paket '{name}' tidak diperbolehkan")
+    return name[:80]
+
+
+def normalize_category(name: str) -> str:
+    cat = (name or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{1,10}", cat):
+        raise ManagerError("Kategori hanya boleh huruf/angka (maks. 10 karakter), mis. TWK")
+    if cat in _WIN_RESERVED:
+        raise ManagerError(f"Kategori '{cat}' tidak diperbolehkan")
+    return cat
+
+
+def make_filename(category: str, number: int) -> str:
+    return f"{category}-{int(number):03d}.png"
+
+
+def image_fingerprint(img: Image.Image) -> str:
+    """Hash isi piksel: gambar identik terdeteksi meskipun nama/metadata file berbeda."""
+    rgba = img.convert("RGBA")
+    h = hashlib.sha256()
+    h.update(f"{rgba.width}x{rgba.height}".encode())
+    h.update(rgba.tobytes())
+    return h.hexdigest()
+
+
+def load_image(path: str | os.PathLike) -> Image.Image:
+    """Buka & decode penuh gambar. Gagal jika file rusak / belum selesai ditulis."""
+    try:
+        with Image.open(path) as im:
+            im.load()
+            if im.width < 1 or im.height < 1:
+                raise ManagerError("Ukuran gambar tidak valid")
+            return im.copy()
+    except ManagerError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - Pillow melempar banyak tipe
+        raise ManagerError(f"Bukan gambar yang valid: {Path(path).name} ({exc})") from exc
+
+
+def _save_png_atomic(img: Image.Image, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if img.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+        img = img.convert("RGBA")
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".png", dir=dest.parent)
+    os.close(fd)
+    try:
+        img.save(tmp, format="PNG", optimize=False)
+        os.replace(tmp, dest)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _write_json_atomic(data: dict, dest: Path) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=dest.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, dest)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------- model
+
+@dataclass
+class Item:
+    id: str
+    fingerprint: str
+    source: str
+    received_at: str
+    category: Optional[str] = None
+    number: Optional[int] = None
+    width: int = 0
+    height: int = 0
+
+    @property
+    def assigned(self) -> bool:
+        return self.category is not None and self.number is not None
+
+    @property
+    def filename(self) -> str:
+        return make_filename(self.category, self.number) if self.assigned else f"{self.id}.png"
+
+    @property
+    def display_name(self) -> str:
+        return self.filename if self.assigned else "(belum diberi nomor)"
+
+    @property
+    def relpath(self) -> str:
+        return f"{self.category}/{self.filename}" if self.assigned else f"{UNASSIGNED_DIR}/{self.filename}"
+
+
+@dataclass
+class AddResult:
+    item: Item
+    replaced: Optional[Item] = None
+
+
+@dataclass
+class ZipResult:
+    path: Path
+    counts: dict[str, int]
+    skipped_unassigned: int
+    total: int
+
+
+@dataclass
+class CaptureSettings:
+    category: str = "TWK"
+    auto_number: bool = True
+    next_number: dict[str, int] = field(default_factory=dict)
+
+
+class Package:
+    """Satu paket soal (mis. Paket-01) beserta workspace-nya."""
+
+    def __init__(self, workspace_root: str | os.PathLike, name: str):
+        self.name = sanitize_package_name(name)
+        self.root = Path(workspace_root) / self.name
+        self.items: list[Item] = []
+        self.categories: list[str] = list(DEFAULT_CATEGORIES)
+        self.capture = CaptureSettings()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._load()
+
+    # ---------- persistence
+    @property
+    def state_path(self) -> Path:
+        return self.root / STATE_FILE
+
+    def _load(self) -> None:
+        if not self.state_path.exists():
+            self.save()
+            return
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            backup = self.state_path.with_suffix(f".rusak-{datetime.now():%Y%m%d%H%M%S}.json")
+            shutil.copy2(self.state_path, backup)
+            raise ManagerError(f"paket.json rusak, cadangan disimpan di {backup.name}: {exc}") from exc
+        self.categories = [normalize_category(c) for c in data.get("categories", DEFAULT_CATEGORIES)]
+        for c in DEFAULT_CATEGORIES:
+            if c not in self.categories:
+                self.categories.insert(DEFAULT_CATEGORIES.index(c), c)
+        cap = data.get("capture", {})
+        self.capture = CaptureSettings(
+            category=cap.get("category", "TWK") if cap.get("category") in self.categories else "TWK",
+            auto_number=bool(cap.get("auto_number", True)),
+            next_number={k: int(v) for k, v in cap.get("next_number", {}).items()},
+        )
+        known = {f.name for f in Item.__dataclass_fields__.values()}
+        self.items = [Item(**{k: v for k, v in raw.items() if k in known}) for raw in data.get("items", [])]
+
+    def save(self) -> None:
+        data = {
+            "version": STATE_VERSION,
+            "package": self.name,
+            "updated_at": _now(),
+            "categories": self.categories,
+            "capture": asdict(self.capture),
+            "items": [asdict(i) for i in self.items],
+        }
+        _write_json_atomic(data, self.state_path)
+
+    # ---------- queries
+    def path_of(self, item: Item) -> Path:
+        return self.root / item.relpath
+
+    def get(self, item_id: str) -> Item:
+        for it in self.items:
+            if it.id == item_id:
+                return it
+        raise ManagerError("Item tidak ditemukan")
+
+    def find_by_fingerprint(self, fp: str) -> Optional[Item]:
+        return next((i for i in self.items if i.fingerprint == fp), None)
+
+    def find_slot(self, category: str, number: int) -> Optional[Item]:
+        return next((i for i in self.items if i.category == category and i.number == number), None)
+
+    def missing_files(self) -> list[Item]:
+        return [i for i in self.items if not self.path_of(i).exists()]
+
+    def sorted_items(self) -> list[Item]:
+        order = {c: n for n, c in enumerate(self.categories)}
+        return sorted(self.items, key=lambda i: (
+            0 if i.assigned else 1, order.get(i.category, 999), i.number or 0, i.received_at))
+
+    def max_number(self, category: str) -> int:
+        return max((i.number for i in self.items if i.category == category and i.number), default=0)
+
+    def next_number_for(self, category: str) -> int:
+        return self.capture.next_number.get(category) or (self.max_number(category) + 1)
+
+    def counts(self) -> dict[str, int]:
+        out = {c: 0 for c in self.categories}
+        for i in self.items:
+            if i.assigned:
+                out[i.category] = out.get(i.category, 0) + 1
+        return out
+
+    # ---------- categories
+    def add_category(self, name: str) -> str:
+        cat = normalize_category(name)
+        if cat not in self.categories:
+            self.categories.append(cat)
+            self.save()
+        return cat
+
+    def set_next_number(self, category: str, number: int) -> None:
+        if int(number) < 1:
+            raise ManagerError("Nomor harus >= 1")
+        self.capture.next_number[category] = int(number)
+        self.save()
+
+    # ---------- mutations
+    def _check_target(self, category: Optional[str], number: Optional[int]) -> None:
+        if (category is None) != (number is None):
+            raise ManagerError("Kategori dan nomor harus diisi bersamaan")
+        if category is not None:
+            if category not in self.categories:
+                raise ManagerError(f"Kategori tidak dikenal: {category}")
+            if int(number) < 1:
+                raise ManagerError("Nomor harus >= 1")
+
+    def _backup_replaced(self, item: Item) -> None:
+        src = self.path_of(item)
+        if src.exists():
+            dest_dir = self.root / REPLACED_DIR
+            dest_dir.mkdir(exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            os.replace(src, dest_dir / f"{Path(item.filename).stem}_{stamp}_{item.id[:6]}.png")
+
+    def add_image(self, source: str | os.PathLike, category: Optional[str] = None,
+                  number: Optional[int] = None) -> AddResult:
+        """Salin screenshot ke workspace (sebagai PNG) dengan metadata yang diberikan.
+
+        - Duplikat (piksel identik) -> DuplicateImageError, tidak ada yang berubah.
+        - Slot kategori+nomor sudah terisi -> salinan lama diganti (dicadangkan ke _diganti/).
+        """
+        self._check_target(category, number)
+        img = load_image(source)
+        fp = image_fingerprint(img)
+        dup = self.find_by_fingerprint(fp)
+        if dup is not None:
+            raise DuplicateImageError(dup)
+
+        item = Item(id=uuid.uuid4().hex, fingerprint=fp, source=str(Path(source).resolve()),
+                    received_at=_now(), category=category,
+                    number=int(number) if number is not None else None,
+                    width=img.width, height=img.height)
+        replaced = self.find_slot(category, item.number) if item.assigned else None
+        _save_png_atomic(img, self.root / (item.relpath + ".new"))  # tulis dulu, baru ganti
+        if replaced is not None:
+            self._backup_replaced(replaced)
+            self.items.remove(replaced)
+        os.replace(self.root / (item.relpath + ".new"), self.path_of(item))
+        self.items.append(item)
+        self.save()
+        return AddResult(item, replaced)
+
+    def assign(self, item_id: str, category: Optional[str], number: Optional[int],
+               on_conflict: str = "error") -> Optional[Item]:
+        """Ubah kategori/nomor item. on_conflict: 'error' | 'swap' | 'replace'.
+
+        Mengembalikan item lain yang terdampak (ditukar/diganti), jika ada.
+        """
+        self._check_target(category, number)
+        item = self.get(item_id)
+        number = int(number) if number is not None else None
+        if item.category == category and item.number == number:
+            return None
+        occupant = self.find_slot(category, number) if category is not None else None
+        if occupant is not None and occupant.id == item.id:
+            occupant = None
+        if occupant is not None and on_conflict == "error":
+            raise SlotTakenError(occupant)
+
+        old_cat, old_num = item.category, item.number
+        old_path = self.path_of(item)
+        tmp_path = self.root / f".move-{item.id}.png"
+        os.replace(old_path, tmp_path)
+        try:
+            if occupant is not None:
+                if on_conflict == "replace":
+                    self._backup_replaced(occupant)
+                    self.items.remove(occupant)
+                elif on_conflict == "swap":
+                    occ_old = self.path_of(occupant)
+                    occupant.category, occupant.number = old_cat, old_num
+                    occ_new = self.path_of(occupant)
+                    occ_new.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(occ_old, occ_new)
+                else:
+                    raise ManagerError(f"Mode konflik tidak dikenal: {on_conflict}")
+            item.category, item.number = category, number
+            new_path = self.path_of(item)
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(tmp_path, new_path)
+        except BaseException:
+            if tmp_path.exists():
+                item.category, item.number = old_cat, old_num
+                os.replace(tmp_path, self.path_of(item))
+            raise
+        finally:
+            self.save()
+        return occupant
+
+    def remove(self, item_id: str) -> Item:
+        """Hapus item dari daftar (dan salinan workspace). File asli tidak disentuh."""
+        item = self.get(item_id)
+        self.path_of(item).unlink(missing_ok=True)
+        self.items.remove(item)
+        self.save()
+        return item
+
+    def renumber(self, category: Optional[str] = None) -> int:
+        """Ulangi penamaan: nomori ulang 1..n per kategori sesuai urutan nomor saat ini."""
+        cats = [category] if category else list(self.categories)
+        changed = 0
+        for cat in cats:
+            members = sorted((i for i in self.items if i.category == cat),
+                             key=lambda i: (i.number, i.received_at))
+            plan = [(it, n) for n, it in enumerate(members, start=1) if it.number != n]
+            if not plan:
+                continue
+            # fase 1: pindah ke nama sementara agar tidak bertabrakan
+            for it, _ in plan:
+                os.replace(self.path_of(it), self.root / f".renum-{it.id}.png")
+            for it, n in plan:
+                it.number = n
+                os.replace(self.root / f".renum-{it.id}.png", self.path_of(it))
+            changed += len(plan)
+            self.capture.next_number[cat] = len(members) + 1
+        self.save()
+        return changed
+
+    def repair(self) -> int:
+        """Samakan nama file di workspace dengan metadata (jika ada yang tidak cocok)."""
+        fixed = 0
+        for it in self.items:
+            expected = self.path_of(it)
+            if expected.exists():
+                continue
+            for cand in (self.root / UNASSIGNED_DIR / f"{it.id}.png",
+                         *(self.root / c / f".renum-{it.id}.png" for c in self.categories),
+                         self.root / f".move-{it.id}.png", self.root / f".renum-{it.id}.png"):
+                if cand.exists():
+                    expected.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(cand, expected)
+                    fixed += 1
+                    break
+        return fixed
+
+    # ---------- export
+    def export_zip(self, dest: str | os.PathLike) -> ZipResult:
+        dest = Path(dest)
+        if dest.suffix.lower() != ".zip":
+            dest = dest.with_suffix(".zip")
+        assigned = [i for i in self.sorted_items() if i.assigned]
+        if not assigned:
+            raise ManagerError("Belum ada screenshot dengan kategori & nomor untuk dimasukkan ke ZIP")
+        missing = [i.filename for i in assigned if not self.path_of(i).exists()]
+        if missing:
+            raise ManagerError("File workspace hilang: " + ", ".join(missing[:10]))
+        names = [i.relpath for i in assigned]
+        if len(set(names)) != len(names):
+            raise ManagerError("Ada nama file ganda; periksa daftar")
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".zip", dir=dest.parent)
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for it in assigned:
+                    zf.write(self.path_of(it), arcname=it.relpath)
+            with zipfile.ZipFile(tmp) as zf:  # verifikasi hasil
+                bad = zf.testzip()
+                if bad is not None:
+                    raise ManagerError(f"ZIP rusak pada {bad}")
+                if sorted(zf.namelist()) != sorted(names):
+                    raise ManagerError("Isi ZIP tidak sesuai daftar")
+            os.replace(tmp, dest)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        counts: dict[str, int] = {}
+        for it in assigned:
+            counts[it.category] = counts.get(it.category, 0) + 1
+        return ZipResult(dest, counts, sum(1 for i in self.items if not i.assigned), len(assigned))
+
+
+def list_packages(workspace_root: str | os.PathLike) -> list[str]:
+    root = Path(workspace_root)
+    if not root.is_dir():
+        return []
+    return sorted(p.name for p in root.iterdir() if (p / STATE_FILE).is_file())
