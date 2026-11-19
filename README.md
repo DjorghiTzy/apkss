@@ -8,7 +8,8 @@ Tanpa login, tanpa internet, tanpa OCR/AI. Aplikasi tidak menyentuh browser, coo
 
 ## Instalasi di Windows
 
-**Pilihan A — Installer** (jika sudah dibuild): jalankan `ScreenshotManager-Setup-1.0.0.exe`.
+**Pilihan A — Installer**: unduh `ScreenshotManager-Setup-x.y.z.exe` dari halaman
+[Releases](https://github.com/DjorghiTzy/apkss/releases/latest) lalu jalankan.
 Tidak butuh hak admin; terpasang di `%LOCALAPPDATA%\Programs\ScreenshotManager`.
 
 **Pilihan B — Build sendiri** (sekali saja):
@@ -101,6 +102,29 @@ Default yang dipantau adalah `C:\Users\djtzy\Pictures\Screenshots`. Jika folder 
 dipindah ke OneDrive (`C:\Users\djtzy\OneDrive\Pictures\Screenshots`), aplikasi mencoba mendeteksinya
 otomatis; jika tidak, pilih lewat **Ganti Folder…**.
 
+## Update aplikasi
+
+- Saat dibuka, aplikasi diam-diam mengecek rilis terbaru di GitHub
+  (`github.com/DjorghiTzy/apkss/releases`). Tombol **Periksa Update** di kanan atas mengecek manual.
+- Jika ada versi baru: **Unduh & Pasang** → installer diunduh, ukuran & SHA-256 diverifikasi,
+  aplikasi menutup, update terpasang diam-diam, lalu aplikasi terbuka lagi. Paket, screenshot,
+  dan pengaturan tidak tersentuh. Ada juga pilihan **Nanti** dan **Lewati Versi Ini**.
+- Cek update butuh repo GitHub **public** (aplikasi tidak menyimpan token). Fungsi utama tetap
+  berjalan offline.
+
+### Menerbitkan versi baru
+
+```
+python tools/bump_version.py 1.0.1
+git commit -am "Rilis v1.0.1"
+git tag v1.0.1
+git push --follow-tags
+```
+
+GitHub Actions lalu menjalankan tes, membuild `.exe` + installer, dan menerbitkan GitHub Release
+`v1.0.1` berisi `ScreenshotManager-Setup-1.0.1.exe` dan versi portable. Semua aplikasi yang
+terpasang akan menawarkan update tersebut.
+
 ## Pengembangan
 
 ```
@@ -110,4 +134,5 @@ python -m pytest -q          # tes inti + simulasi alur kerja di jendela asli
 
 Struktur: `screenshot_manager/core.py` (penamaan, duplikat, workspace, ZIP),
 `watcher.py` (pemantauan folder), `app.py` (UI PySide6), `run.py` (entry point),
-`ScreenshotManager.spec` (PyInstaller), `installer.iss` (Inno Setup), `build_windows.bat`.
+`updater.py` (cek & pasang update dari GitHub Releases), `ScreenshotManager.spec` (PyInstaller),
+`installer.iss` (Inno Setup), `build_windows.bat`, `tools/bump_version.py`.

@@ -52,7 +52,8 @@ def win(tmp_path, monkeypatch):
     cfg = home / ".config" / "ScreenshotManager"
     cfg.mkdir(parents=True)
     (cfg / "settings.json").write_text(json.dumps({"watch_folder": str(shots),
-                                                   "workspace": str(home / "ws")}))
+                                                   "workspace": str(home / "ws"),
+                                                   "auto_update_check": False}))
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
     app = QApplication.instance() or QApplication([])

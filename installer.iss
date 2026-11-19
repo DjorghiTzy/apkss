@@ -1,7 +1,9 @@
 ; Installer Windows (Inno Setup 6). Jalankan build_windows.bat terlebih dahulu.
 ; Kompilasi: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 #define AppName "Screenshot Manager"
-#define AppVersion "1.0.0"
+#ifndef AppVersion
+  #define AppVersion "1.0.0"
+#endif
 
 [Setup]
 AppId={{6F1C2E4A-8B3D-4E59-9A71-5C2D0B7E3F10}
@@ -20,6 +22,9 @@ SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
+; tutup aplikasi yang sedang jalan saat update, data pengguna tidak disentuh
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "indonesian"; MessagesFile: "compiler:Languages\Indonesian.isl"
@@ -37,4 +42,4 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\ScreenshotManager.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\ScreenshotManager.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\ScreenshotManager.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall

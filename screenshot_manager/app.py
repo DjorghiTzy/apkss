@@ -5,14 +5,15 @@ import json
 import logging
 import os
 import sys
+import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QObject, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader,
                            QKeySequence, QPixmap)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox,
+from PySide6.QtWidgets import (QProgressDialog, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
                                QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
                                QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from . import __version__
 from .core import (DuplicateImageError, IMAGE_EXTS, Item, ManagerError, Package,
                    SlotTakenError, list_packages, make_filename, sanitize_package_name)
+from . import updater
 from .watcher import FolderWatcher
 
 APP_NAME = "Screenshot Manager"
@@ -135,6 +137,46 @@ BANNER_STYLES = {
 }
 
 
+class UpdateWorker(QObject):
+    """Menjalankan cek/unduh update di thread terpisah agar UI tidak macet."""
+    checked = Signal(object, bool)      # ReleaseInfo, silent
+    failed = Signal(str, bool)          # pesan, silent
+    progress = Signal(int, int)
+    downloaded = Signal(str)
+    download_failed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.busy = False
+        self.cancel_flag = False
+
+    def check(self, silent: bool):
+        if self.busy:
+            return
+        self.busy = True
+
+        def run():
+            try:
+                self.checked.emit(updater.fetch_latest(), silent)
+            except updater.UpdateError as exc:
+                self.failed.emit(str(exc), silent)
+            finally:
+                self.busy = False
+        threading.Thread(target=run, daemon=True).start()
+
+    def download(self, info):
+        self.cancel_flag = False
+
+        def run():
+            try:
+                path = updater.download_installer(info, lambda d, t: self.progress.emit(d, t),
+                                                  lambda: self.cancel_flag)
+                self.downloaded.emit(str(path))
+            except updater.UpdateError as exc:
+                self.download_failed.emit(str(exc))
+        threading.Thread(target=run, daemon=True).start()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -163,6 +205,16 @@ class MainWindow(QMainWindow):
         self.set_banner("Siap. Atur paket, kategori, dan nomor lalu klik “Siapkan Screenshot Berikutnya”.",
                         "info")
 
+        self.updates = UpdateWorker(self)
+        self.updates.checked.connect(self._on_update_checked)
+        self.updates.failed.connect(self._on_update_failed)
+        self.updates.progress.connect(self._on_update_progress)
+        self.updates.downloaded.connect(self._on_update_downloaded)
+        self.updates.download_failed.connect(self._on_update_download_failed)
+        self._update_dialog: QProgressDialog | None = None
+        if self.settings["auto_update_check"] is not False:
+            QTimer.singleShot(2500, lambda: self.check_updates(silent=True))
+
     # ============================================================ UI build
     def _build_ui(self):
         root = QWidget()
@@ -189,10 +241,13 @@ class MainWindow(QMainWindow):
         btn_clip.clicked.connect(self.paste_clipboard)
         self.chk_top = QCheckBox("Selalu di atas")
         self.chk_top.toggled.connect(self.set_on_top)
+        self.btn_update = QPushButton("Periksa Update")
+        self.btn_update.setToolTip(f"Versi terpasang: {__version__}")
+        self.btn_update.clicked.connect(lambda: self.check_updates(silent=False))
         top.addWidget(self.lbl_watch)
         top.addWidget(QLabel("Folder Screenshots:"))
         top.addWidget(self.ed_folder, 1)
-        for w in (btn_folder, btn_refresh, btn_manual, btn_clip, self.chk_top):
+        for w in (btn_folder, btn_refresh, btn_manual, btn_clip, self.chk_top, self.btn_update):
             top.addWidget(w)
         outer.addLayout(top)
 
@@ -913,6 +968,98 @@ class MainWindow(QMainWindow):
         if box.clickedButton() is b_open:
             self.open_path(res.path.parent)
 
+    # ============================================================ update
+    def check_updates(self, silent: bool):
+        if not silent:
+            self.btn_update.setEnabled(False)
+            self.btn_update.setText("Memeriksa…")
+        self.updates.check(silent)
+
+    def _reset_update_button(self):
+        self.btn_update.setEnabled(True)
+        self.btn_update.setText("Periksa Update")
+
+    def _on_update_failed(self, msg: str, silent: bool):
+        self._reset_update_button()
+        self.log_event(f"Cek update gagal: {msg}", "warn" if not silent else "info")
+        if not silent:
+            QMessageBox.warning(self, "Periksa Update", f"Tidak bisa memeriksa update.\n\n{msg}")
+
+    def _on_update_checked(self, info, silent: bool):
+        self._reset_update_button()
+        if not updater.is_newer(info.version):
+            self.log_event(f"Aplikasi sudah versi terbaru ({__version__})")
+            if not silent:
+                QMessageBox.information(self, "Periksa Update",
+                                        f"Anda sudah memakai versi terbaru ({__version__}).")
+            return
+        if silent and self.settings["skip_version"] == info.version:
+            return
+        self.btn_update.setText(f"Update {info.version} tersedia!")
+        self.btn_update.setStyleSheet("background:#d9a400; font-weight:bold")
+        self.log_event(f"Versi baru tersedia: {info.version}", "warn")
+        notes = info.notes[:1500] or "(tanpa catatan rilis)"
+        box = QMessageBox(self)
+        box.setWindowTitle("Update tersedia")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"<b>Screenshot Manager {info.version}</b> tersedia "
+                    f"(terpasang: {__version__}).<br><br>Data paket & screenshot Anda tetap aman.")
+        box.setDetailedText(notes)
+        can_install = updater.can_self_install() and info.asset_url
+        b_install = box.addButton("Unduh && Pasang" if can_install else "Buka Halaman Unduhan",
+                                  QMessageBox.AcceptRole)
+        box.addButton("Nanti", QMessageBox.RejectRole)
+        b_skip = box.addButton("Lewati Versi Ini", QMessageBox.DestructiveRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_skip:
+            self.settings["skip_version"] = info.version
+        elif clicked is b_install:
+            if can_install:
+                self._start_update_download(info)
+            else:
+                QDesktopServices.openUrl(QUrl(info.page_url))
+
+    def _start_update_download(self, info):
+        dlg = QProgressDialog(f"Mengunduh {info.asset_name}…", "Batal", 0, 100, self)
+        dlg.setWindowTitle("Update")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.canceled.connect(lambda: setattr(self.updates, "cancel_flag", True))
+        dlg.show()
+        self._update_dialog = dlg
+        self.updates.download(info)
+
+    def _on_update_progress(self, done: int, total: int):
+        if self._update_dialog is not None and total:
+            self._update_dialog.setValue(int(done * 100 / total))
+            self._update_dialog.setLabelText(f"Mengunduh… {done / 1e6:.1f} / {total / 1e6:.1f} MB")
+
+    def _close_update_dialog(self):
+        if self._update_dialog is not None:
+            self._update_dialog.reset()
+            self._update_dialog.close()
+            self._update_dialog = None
+
+    def _on_update_download_failed(self, msg: str):
+        self._close_update_dialog()
+        self.error(f"Update gagal: {msg}")
+
+    def _on_update_downloaded(self, path: str):
+        self._close_update_dialog()
+        self.log_event(f"Installer diunduh: {path}", "ok")
+        if QMessageBox.question(self, "Pasang update",
+                                "Installer siap. Aplikasi akan ditutup, update dipasang, lalu "
+                                "aplikasi dibuka kembali otomatis.\n\nLanjutkan sekarang?") \
+                != QMessageBox.Yes:
+            return
+        try:
+            updater.launch_installer(Path(path))
+        except OSError as exc:
+            return self.error(f"Tidak bisa menjalankan installer: {exc}")
+        self.close()
+        QApplication.instance().quit()
+
     def closeEvent(self, e):
         self.watcher.stop()
         super().closeEvent(e)
@@ -933,6 +1080,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
+    app.setQuitOnLastWindowClosed(True)
     app.setStyle("Fusion")
     icon_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "assets" / "icon.ico"
     if icon_path.exists():
