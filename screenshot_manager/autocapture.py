@@ -236,6 +236,87 @@ class AutoCapture:
         self._sleep(max(0.8, self.cfg.wait_load))
         self._shown_cat = cat
 
+    # ------------------------------------------------------------ grid nyata di layar
+    def _grid_region(self):
+        nav = self.cfg.nav
+        x0, y0 = nav.grid_first
+        dx = abs(nav.grid_second[0] - x0) or 30
+        dy = abs(nav.grid_below[1] - y0) or 30
+        sw, sh = self.cfg.crop["screen"]
+        left = max(0, int(x0 - 2 * dx))
+        right = min(sw, int(x0 + (nav.columns + 1) * dx))
+        top = max(0, int(y0 - 3 * dy))
+        return left, top, right, sh, dx, dy
+
+    def _detect_live_grid(self, img=None):
+        """Cari grid Daftar Soal yang sedang tampil (posisi bisa sedikit berbeda tiap kategori)."""
+        from .autosetup import GridInfo, detect_grid
+        nav = self.cfg.nav
+        left, top, right, bottom, dx, dy = self._grid_region()
+        img = img if img is not None else self.d.grab()
+        sub = img.crop((left, top, right, bottom))
+        box = int(0.7 * min(dx, dy))
+        hint = GridInfo((nav.grid_first[0] - left, nav.grid_first[1] - top), dx, dy, nav.columns, 1, box,
+                        (0, 0, 0, 0))
+        g = detect_grid(sub, hint=hint)
+        if g is None or g.cols != nav.columns:
+            return None, (left, top)
+        return g, (left, top)
+
+    def _current_index(self, img, g, off) -> Optional[int]:
+        """Nomor soal aktif = tombol berwarna oranye/berbeda di grid (None bila tak terlihat)."""
+        import numpy as np
+        a = np.asarray(img.convert("RGB"), dtype=np.int16)
+        cols = []
+        for n in range(1, g.count + 1):
+            x, y = g.position(n)
+            x, y = x + off[0], y + off[1]
+            r = max(2, g.box // 4)
+            patch = a[max(0, y - r):y + r, max(0, x - r):x + r].reshape(-1, 3)
+            if len(patch) == 0:
+                return None
+            cols.append(np.median(patch, axis=0))
+        cols = np.array(cols)
+        common = np.median(cols, axis=0)
+        dist = np.abs(cols - common).max(axis=1)
+        k = int(dist.argmax())
+        if dist[k] < 40 or (dist > 40).sum() != 1:
+            return None
+        return k + 1
+
+    def _click_number(self, n: int):
+        """Klik tombol nomor n pada grid yang benar-benar terlihat; verifikasi lewat tombol aktif."""
+        nav = self.cfg.nav
+        for attempt in range(3):
+            self.d.move(*self.park)
+            self._sleep(0.15)
+            img = self.d.grab()
+            g, off = self._detect_live_grid(img)
+            if g is not None and g.count < n:                 # baris bawah tak terlihat: geser sedikit
+                self.d.scroll(*self.center, -3)
+                self._sleep(0.4)
+                img = self.d.grab()
+                g, off = self._detect_live_grid(img)
+            if g is not None and g.count >= n:
+                x, y = g.position(n)
+                pos = (x + off[0], y + off[1])
+            else:
+                pos = nav.grid_position(n)
+                if attempt == 0:
+                    self.progress("  grid tidak terdeteksi ulang, memakai posisi tersimpan")
+            self.d.click(*pos)
+            self.d.move(*self.park)
+            self._sleep(max(0.4, min(1.0, self.cfg.wait_load)))
+            if g is None:
+                return
+            after = self.d.grab()
+            g2, off2 = self._detect_live_grid(after)
+            cur = self._current_index(after, g2, off2) if g2 is not None else None
+            if cur is None or cur == n:
+                return
+            self.progress(f"  klik nomor {n} belum berpindah (aktif: {cur}), ulangi")
+        # biarkan pengecekan duplikat yang memutuskan
+
     def _navigate(self, g: int, first: bool, cat: str = "", local: int = 0, force_cat: bool = False):
         nav = self.cfg.nav
         if nav.mode == "grid":
@@ -243,7 +324,7 @@ class AutoCapture:
                 self._select_category(cat)
             self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)   # grid di posisi awal
             self._sleep(0.3)
-            self.d.click(*nav.grid_position(local if nav.per_category else g))
+            self._click_number(local if nav.per_category else g)
         elif not first:
             if nav.mode == "point":
                 self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)

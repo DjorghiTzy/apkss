@@ -146,8 +146,9 @@ class FakeAlfaiz:
     CATS = ["TWK", "TIU", "TKP"]
 
     def __init__(self, counts, height_of=lambda cat, n: 900 + (n * 173) % 1500, start_cat="TWK",
-                 px_per_notch=53):
+                 px_per_notch=53, dy_extra=None):
         self.counts = counts
+        self.dy_extra = dy_extra or {}          # grid kategori tertentu sedikit lebih renggang
         self.pages = {(c, n): make_page(1000 * (i + 1) + n, height_of(c, n))
                       for i, c in enumerate(self.CATS) if c in counts for n in range(1, counts[c] + 1)}
         self.cat, self.n, self.scroll_y, self.open = start_cat, 1, 0, False
@@ -196,7 +197,7 @@ class FakeAlfaiz:
 
     def pos(self, k):
         r, c = divmod(k - 1, self.COLS)
-        return self.GRID0[0] + c * self.DX, self.GRID0[1] + r * self.DY
+        return self.GRID0[0] + c * self.DX, self.GRID0[1] + r * (self.DY + self.dy_extra.get(self.cat, 0))
 
     # ---- input
     def move(self, x, y):

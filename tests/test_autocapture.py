@@ -146,8 +146,6 @@ def test_alfaiz_flow_per_category(tmp_path):
             want = b.page_of(cat, k)
             with Image.open(pkg.path_of(it)) as im:
                 assert im.convert("RGB").tobytes() == want.tobytes(), (cat, k)
-    # TKP-008 ada di baris ke-2 grid: klik pada posisi lokal, bukan global (21)
-    assert (CAT_GRID["first"][0] + 2 * CAT_GRID["dx"], CAT_GRID["first"][1] + CAT_GRID["dy"]) in b.clicks
 
 
 def test_alfaiz_resume_after_stop_skips_without_navigating(tmp_path):

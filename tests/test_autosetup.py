@@ -48,3 +48,22 @@ def test_autosetup_then_full_capture(tmp_path):
             assert got.height == page.height, (cat, k, got.size, page.size)
             off = cx - x
             assert got.crop((off, 0, off + cw, got.height)).tobytes() == page.tobytes(), (cat, k)
+
+
+def test_tkp_grid_slightly_different_still_reaches_every_number(tmp_path):
+    """Kasus nyata: TKP gagal di nomor 31 (baris ke-7) karena grid TKP sedikit lebih renggang."""
+    counts = {"TWK": 10, "TIU": 12, "TKP": 45}
+    b = FakeAlfaiz(counts, dy_extra={"TKP": 3}, height_of=lambda c, n: 700 + (n * 37) % 300)
+    res = run_autosetup(b, ["TWK", "TIU", "TKP"], wait_load=0)
+    assert res.counts == counts
+    pkg = Package(tmp_path / "ws", "P")
+    plan = Plan(sections=[[c, n] for c, n in res.counts.items()])
+    rep = AutoCapture(pkg, plan, RunConfig(crop=res.crop, nav=res.nav, wait_load=0, stable_interval=0), b).run()
+    assert rep.aborted is None, rep.aborted
+    assert len(pkg.items) == 67
+    for k in (31, 40, 45):
+        with Image.open(pkg.path_of(pkg.find_slot("TKP", k))) as im:
+            off = FakeAlfaiz.CONTENT[0] - res.crop["rect"][0]
+            got = im.convert("RGB")
+            page = b.page_of("TKP", k)
+            assert got.crop((off, 0, off + page.width, got.height)).tobytes() == page.tobytes(), k
