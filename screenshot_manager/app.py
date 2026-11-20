@@ -13,7 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPen,
                            QKeySequence, QPixmap)
-from PySide6.QtWidgets import (QProgressDialog, QDoubleSpinBox, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
+from PySide6.QtWidgets import (QMenu, QProgressDialog, QDoubleSpinBox, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
                                QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
                                QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -756,6 +756,7 @@ class MainWindow(QMainWindow):
 
         self._open_package(self.settings["package"] or "Paket-01")
         self.chk_top.setChecked(bool(self.settings["always_on_top"]))
+        self.chk_figural.setChecked(self.settings["zip_figural"] is not False)
         self._refresh_crop_label()
         self.start_watching(self.settings["watch_folder"])
         self.set_banner("Siap. Atur paket, kategori, dan nomor lalu klik “Siapkan Screenshot Berikutnya”.",
@@ -846,6 +847,10 @@ class MainWindow(QMainWindow):
         self.btn_zip.clicked.connect(self.make_zip)
         zipbox.addWidget(self.lbl_counts)
         zipbox.addWidget(self.btn_zip)
+        self.chk_figural = QCheckBox("Sertakan soal bergambar (JSON + gambar)")
+        self.chk_figural.setToolTip("Untuk soal yang berisi gambar (figural), ZIP juga berisi folder figural/: "
+                                    "JSON per soal dengan gambar base64 + file PNG tiap gambar.")
+        zipbox.addWidget(self.chk_figural)
         bottom.addLayout(zipbox)
         outer.addLayout(bottom)
 
@@ -996,9 +1001,9 @@ class MainWindow(QMainWindow):
         self.lbl_list = QLabel("Screenshot diterima")
         self.lbl_list.setStyleSheet("font-weight:bold")
         lay.addWidget(self.lbl_list)
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(["Preview", "Kategori", "Nomor", "Nama File", "Bagian",
-                                              "File Asli", "Diterima"])
+                                              "Gambar", "File Asli", "Diterima"])
         self.table.setIconSize(THUMB)
         self.table.verticalHeader().setDefaultSectionSize(THUMB.height() + 8)
         self.table.verticalHeader().setVisible(False)
@@ -1007,7 +1012,7 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(5, QHeaderView.Stretch)
+        hh.setSectionResizeMode(6, QHeaderView.Stretch)
         hh.setSectionResizeMode(0, QHeaderView.Fixed)
         self.table.setColumnWidth(0, THUMB.width() + 12)
         self.table.itemSelectionChanged.connect(self._update_preview)
@@ -1025,9 +1030,15 @@ class MainWindow(QMainWindow):
         b_part = QPushButton("Hapus Bagian Terakhir")
         b_part.setToolTip("Lepas sambungan terakhir dari gambar terpilih")
         b_part.clicked.connect(self.remove_last_part)
+        b_fig = QPushButton("🖼 Gambar ▾")
+        b_fig.setToolTip("Soal bergambar (figural): gambar di dalam soal ikut diekspor sebagai JSON")
+        m_fig = QMenu(b_fig)
+        m_fig.addAction("Deteksi ulang gambar (baris terpilih)", lambda: self.set_figural(True))
+        m_fig.addAction("Tandai BUKAN soal bergambar", lambda: self.set_figural(False))
+        b_fig.setMenu(m_fig)
         b_ws = QPushButton("Buka Workspace")
         b_ws.clicked.connect(lambda: self.open_path(self.pkg.root))
-        for b in (b_edit, b_del, b_ren, b_part, b_ws):
+        for b in (b_edit, b_del, b_ren, b_part, b_fig, b_ws):
             row.addWidget(b)
         lay.addLayout(row)
         return panel
@@ -1346,6 +1357,7 @@ class MainWindow(QMainWindow):
                             "(klik dua kali), atau klik “Siapkan” sebelum screenshot berikutnya.", "warn")
             self.log_event(f"Masuk tanpa metadata: {name} [{origin}]", "warn")
         self._update_capture_labels()
+        self._figures_for(item)
         self.refresh_table(select_id=item.id)
 
     # ============================================================ bagian lanjutan
@@ -1391,7 +1403,40 @@ class MainWindow(QMainWindow):
                         f"({item.width}×{item.height}px{ov}){nxt}", "ok")
         self.log_event(f"Bagian {res.part_number} disambung ke {item.filename} dari {name} [{origin}]", "ok")
         self._update_capture_labels()
+        self._figures_for(item)
         self.refresh_table(select_id=item.id)
+
+    # ============================================================ soal bergambar
+    def _figure_cell(self, it: Item) -> QTableWidgetItem:
+        if it.figures_off:
+            c = QTableWidgetItem("bukan")
+            c.setToolTip("Ditandai bukan soal bergambar")
+        elif it.figures:
+            c = QTableWidgetItem(f"🖼 {len(it.figures)}")
+            c.setToolTip("Soal bergambar: " + ", ".join(f["bagian"] for f in it.figures))
+            c.setForeground(QColor("#6f42c1"))
+        else:
+            c = QTableWidgetItem("—" if it.figures_checked else "?")
+        return c
+
+    def _figures_for(self, item: Item):
+        try:
+            figs = self.pkg.update_figures(item.id)
+        except ManagerError:
+            return
+        if figs:
+            self.log_event(f"🖼 {item.display_name}: soal bergambar, {len(figs)} gambar "
+                           f"({', '.join(f['bagian'] for f in figs)})", "ok")
+
+    def set_figural(self, on: bool):
+        sel = self.selected_items()
+        if not sel:
+            return self.error("Pilih baris di daftar terlebih dahulu")
+        for it in sel:
+            figs = self.pkg.set_figural(it.id, on)
+            self.log_event(f"{it.display_name}: " + (f"{len(figs)} gambar terdeteksi" if on
+                                                      else "ditandai bukan soal bergambar"))
+        self.refresh_table()
 
     def remove_last_part(self):
         sel = self.selected_items()
@@ -1404,6 +1449,7 @@ class MainWindow(QMainWindow):
         self._thumbs.clear()
         self.log_event(f"Bagian terakhir dilepas dari {item.display_name} (sisa {item.parts})", "warn")
         self.set_banner(f"Bagian terakhir dilepas dari {item.display_name} — sisa {item.parts} bagian", "warn")
+        self._figures_for(item)
         self.refresh_table(select_id=item.id)
 
     # ============================================================ crop
@@ -1789,9 +1835,10 @@ class MainWindow(QMainWindow):
                      QTableWidgetItem(str(it.number) if it.number else "—"),
                      QTableWidgetItem(it.display_name),
                      QTableWidgetItem(str(it.parts)),
+                     self._figure_cell(it),
                      QTableWidgetItem(Path(it.source).name),
                      QTableWidgetItem(it.received_at.replace("T", " "))]
-            cells[5].setToolTip(it.source)
+            cells[6].setToolTip(it.source)
             f = QFont()
             f.setBold(True)
             cells[3].setFont(f)
@@ -1809,7 +1856,9 @@ class MainWindow(QMainWindow):
         counts = self.pkg.counts()
         unassigned = sum(1 for i in self.pkg.items if not i.assigned)
         parts = " · ".join(f"{c} {n}" for c, n in counts.items())
-        self.lbl_counts.setText(parts + (f" · belum: {unassigned}" if unassigned else ""))
+        figural = sum(1 for i in self.pkg.items if i.assigned and i.figures)
+        self.lbl_counts.setText(parts + (f" · belum: {unassigned}" if unassigned else "")
+                                + (f" · 🖼 {figural}" if figural else ""))
         self.lbl_list.setText(f"Screenshot diterima — {self.pkg.name} ({len(items)} gambar)")
         self._update_capture_labels()
         self._update_preview()
@@ -1841,9 +1890,17 @@ class MainWindow(QMainWindow):
         if pm.isNull():
             self.preview.setText("File tidak ditemukan")
         else:
+            if it.figures:                                 # tandai gambar yang terdeteksi
+                p = QPainter(pm)
+                p.setPen(QPen(QColor("#6f42c1"), max(3, pm.width() // 250)))
+                for f in it.figures:
+                    p.drawRect(QRect(f["x"], f["y"], f["w"], f["h"]))
+                p.end()
             self.preview.setPixmap(pm.scaled(self.preview.size() - QSize(8, 8),
                                              Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self.preview_info.setText(f"<b>{it.display_name}</b><br>{it.width}×{it.height}px<br>"
+        figs = (f"<br>🖼 <b>Soal bergambar</b>: {len(it.figures)} gambar ("
+                + ", ".join(f["bagian"] for f in it.figures) + ") — kotak ungu") if it.figures else ""
+        self.preview_info.setText(f"<b>{it.display_name}</b><br>{it.width}×{it.height}px{figs}<br>"
                                   f"Workspace: {path}<br>Asli: {it.source}")
 
     def resizeEvent(self, e):
@@ -1942,7 +1999,12 @@ class MainWindow(QMainWindow):
         if not dest:
             return
         try:
-            res = self.pkg.export_zip(dest)
+            self.settings["zip_figural"] = self.chk_figural.isChecked()
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                res = self.pkg.export_zip(dest, figural=self.chk_figural.isChecked())
+            finally:
+                QApplication.restoreOverrideCursor()
         except (ManagerError, OSError) as exc:
             return self.error(f"ZIP gagal: {exc}")
         self.settings["zip_dir"] = str(res.path.parent)
@@ -1952,6 +2014,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("ZIP berhasil dibuat")
         box.setText(f"{res.path}\n\n{res.total} gambar: {detail}"
+                    + (f"\n🖼 {res.figural} soal bergambar → folder figural/ (JSON + gambar)" if res.figural else "")
                     + (f"\n{res.skipped_unassigned} gambar tanpa nomor dilewati." if res.skipped_unassigned else ""))
         b_open = box.addButton("Buka Folder", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Ok)

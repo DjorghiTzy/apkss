@@ -245,6 +245,9 @@ class Item:
     height: int = 0
     parts: int = 1
     part_fps: list = field(default_factory=list)
+    figures: list = field(default_factory=list)   # [{x, y, w, h, bagian}] gambar di dalam soal
+    figures_checked: bool = False                 # False = perlu dideteksi ulang
+    figures_off: bool = False                     # ditandai pengguna: bukan soal bergambar
 
     @property
     def assigned(self) -> bool:
@@ -284,6 +287,7 @@ class ZipResult:
     counts: dict[str, int]
     skipped_unassigned: int
     total: int
+    figural: int = 0          # jumlah soal bergambar yang diberi JSON
 
 
 @dataclass
@@ -457,6 +461,7 @@ class Package:
         item.width, item.height = img.width, img.height
         item.fingerprint = image_fingerprint(img)
         item.parts = len(files)
+        item.figures_checked = False
         return overlaps
 
     def append_part(self, item_id: str, source: str | os.PathLike,
@@ -600,7 +605,53 @@ class Package:
         return fixed
 
     # ---------- export
-    def export_zip(self, dest: str | os.PathLike) -> ZipResult:
+    # ---------- soal bergambar (figural)
+    def update_figures(self, item_id: str, force: bool = False) -> list:
+        """Deteksi gambar di screenshot soal (bila berubah sejak deteksi terakhir)."""
+        item = self.get(item_id)
+        if item.figures_off:
+            item.figures, item.figures_checked = [], True
+            return []
+        if item.figures_checked and not force:
+            return item.figures
+        from .figures import detect_figures
+        try:
+            with Image.open(self.path_of(item)) as im:
+                item.figures = detect_figures(im)
+        except Exception:  # noqa: BLE001 - deteksi gagal tidak boleh menggagalkan alur utama
+            item.figures = []
+        item.figures_checked = True
+        self.save()
+        return item.figures
+
+    def set_figural(self, item_id: str, on: bool) -> list:
+        """on=False: tandai bukan soal bergambar; on=True: deteksi ulang."""
+        item = self.get(item_id)
+        item.figures_off = not on
+        item.figures_checked = False
+        return self.update_figures(item_id)
+
+    def figural_payload(self, item: Item) -> tuple[dict, list[tuple[str, bytes]]]:
+        """JSON (dengan gambar base64) + file PNG per gambar untuk satu soal bergambar."""
+        from .figures import crop_png_bytes, data_uri
+        stem = Path(item.filename).stem
+        files, figs = [], []
+        with Image.open(self.path_of(item)) as im:
+            img = im.convert("RGB")
+            for i, f in enumerate(item.figures, start=1):
+                png = crop_png_bytes(img, f)
+                path = f"figural/{stem}/{i}.png"
+                files.append((path, png))
+                figs.append({"id": i, "bagian": f.get("bagian", "gambar"), "file": path,
+                             "kotak": {k: f[k] for k in ("x", "y", "w", "h")},
+                             "lebar": f["w"], "tinggi": f["h"], "data": data_uri(png)})
+            size = img.size
+        doc = {"versi": 1, "paket": self.name, "kategori": item.category, "nomor": item.number,
+               "id": stem, "file_soal": item.relpath, "lebar_soal": size[0], "tinggi_soal": size[1],
+               "jumlah_gambar": len(figs), "gambar": figs}
+        return doc, files
+
+    def export_zip(self, dest: str | os.PathLike, figural: bool = True) -> ZipResult:
         dest = Path(dest)
         if dest.suffix.lower() != ".zip":
             dest = dest.with_suffix(".zip")
@@ -613,6 +664,11 @@ class Package:
         names = [i.relpath for i in assigned]
         if len(set(names)) != len(names):
             raise ManagerError("Ada nama file ganda; periksa daftar")
+        fig_items = []
+        if figural:
+            for it in assigned:
+                if self.update_figures(it.id):
+                    fig_items.append(it)
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".zip", dir=dest.parent)
@@ -621,6 +677,23 @@ class Package:
             with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for it in assigned:
                     zf.write(self.path_of(it), arcname=it.relpath)
+                index = []
+                for it in fig_items:
+                    doc, files = self.figural_payload(it)
+                    stem = doc["id"]
+                    zf.writestr(f"figural/{stem}.json", json.dumps(doc, ensure_ascii=False, indent=2))
+                    names.append(f"figural/{stem}.json")
+                    for path, png in files:
+                        zf.writestr(path, png)
+                        names.append(path)
+                    index.append({"id": stem, "kategori": it.category, "nomor": it.number,
+                                  "file_soal": it.relpath, "json": f"figural/{stem}.json",
+                                  "jumlah_gambar": doc["jumlah_gambar"],
+                                  "bagian": [g["bagian"] for g in doc["gambar"]]})
+                if index:
+                    zf.writestr("figural/index.json", json.dumps(
+                        {"versi": 1, "paket": self.name, "soal_bergambar": index}, ensure_ascii=False, indent=2))
+                    names.append("figural/index.json")
             with zipfile.ZipFile(tmp) as zf:  # verifikasi hasil
                 bad = zf.testzip()
                 if bad is not None:
@@ -634,7 +707,8 @@ class Package:
         counts: dict[str, int] = {}
         for it in assigned:
             counts[it.category] = counts.get(it.category, 0) + 1
-        return ZipResult(dest, counts, sum(1 for i in self.items if not i.assigned), len(assigned))
+        return ZipResult(dest, counts, sum(1 for i in self.items if not i.assigned), len(assigned),
+                         len(fig_items))
 
 
 def list_packages(workspace_root: str | os.PathLike) -> list[str]:

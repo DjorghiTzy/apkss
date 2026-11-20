@@ -283,6 +283,8 @@ class AutoCapture:
                 self._current = item_id
                 self._capture_rest(item_id, name, rep)
                 self._current = None
+                if self.pkg.update_figures(item_id):
+                    self.progress(f"  🖼 soal bergambar: {len(self.pkg.get(item_id).figures)} gambar")
                 it = self.pkg.get(item_id)
                 rep.done.append(it.filename)
                 self.progress(f"[{idx + 1}/{len(entries)}] ✔ {it.filename} ({it.parts} bagian, "

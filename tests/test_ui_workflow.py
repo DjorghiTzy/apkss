@@ -359,3 +359,40 @@ def test_f10_without_settings_runs_auto_setup_then_capture(win, monkeypatch):
     for cat, n in counts.items():
         for k in range(1, n + 1):
             assert w.pkg.find_slot(cat, k).height == b.page_of(cat, k).height
+
+
+def test_figural_question_in_window_and_zip(win, tmp_path, monkeypatch):
+    from tests.fake_questions import make_question
+
+    w, shots = win, win._shots
+    w.select_category("TIU")
+    w.set_number(7)
+    w.arm()
+    fig, _ = make_question(4, fig_soal=True, fig_opsi=True)
+    fig.save(shots / "figural.png")
+    plain, _ = make_question(5)
+    assert wait_until(lambda: w.pkg.find_slot("TIU", 7) is not None)
+    plain.save(shots / "teks.png")
+    assert wait_until(lambda: w.pkg.find_slot("TIU", 8) is not None)
+    w.refresh_table()
+    cells = {w.table.item(r, 3).text(): w.table.item(r, 5).text() for r in range(w.table.rowCount())}
+    assert cells["TIU-007.png"] == "🖼 6" and cells["TIU-008.png"] == "—", cells
+    assert "🖼 1" in w.lbl_counts.text()
+
+    dest = tmp_path / "Paket-01.zip"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(dest), ""))
+    w.make_zip()
+    with zipfile.ZipFile(dest) as zf:
+        names = zf.namelist()
+    assert "figural/TIU-007.json" in names and "figural/index.json" in names
+    assert not any("TIU-008" in n for n in names if n.startswith("figural/"))
+
+    # tandai bukan bergambar dari menu
+    r = next(r for r in range(w.table.rowCount()) if w.table.item(r, 3).text() == "TIU-007.png")
+    w.table.selectRow(r)
+    w.set_figural(False)
+    assert w.pkg.find_slot("TIU", 7).figures == []
+    w.chk_figural.setChecked(False)
+    w.make_zip()
+    with zipfile.ZipFile(dest) as zf:
+        assert not any(n.startswith("figural/") for n in zf.namelist())

@@ -153,6 +153,46 @@ Paket-01.zip
 Hanya gambar yang punya kategori & nomor yang dimasukkan. ZIP ditulis ke file sementara, diverifikasi
 (CRC + daftar isi), baru disimpan, jadi tidak pernah ada ZIP setengah jadi.
 
+## Soal bergambar (figural)
+
+Setiap screenshot diperiksa otomatis (tanpa OCR/AI, murni bentuk piksel). Soal yang berisi
+gambar — bangun, pola, grafik, tabel — ditandai 🖼 di kolom **Gambar**, dan kotak ungu di
+preview menunjukkan gambar yang ditemukan. Salah deteksi bisa dikoreksi lewat tombol
+**🖼 Gambar ▾** (deteksi ulang / tandai bukan soal bergambar).
+
+Dengan **Sertakan soal bergambar** tercentang (bawaan), ZIP mendapat folder tambahan
+`figural/` khusus untuk soal bergambar; folder TWK/TIU/TKP tidak berubah:
+
+```
+Paket-01.zip
+├── TIU/TIU-012.png            screenshot utuh (seperti biasa)
+└── figural/
+    ├── index.json             daftar semua soal bergambar
+    ├── TIU-012.json           metadata + gambar (base64) — bisa dipakai tanpa file lain
+    └── TIU-012/1.png, 2.png…  tiap gambar sebagai file PNG
+```
+
+`figural/TIU-012.json`:
+
+```json
+{
+  "versi": 1, "paket": "Paket-01", "kategori": "TIU", "nomor": 12, "id": "TIU-012",
+  "file_soal": "TIU/TIU-012.png", "lebar_soal": 760, "tinggi_soal": 1980,
+  "jumlah_gambar": 6,
+  "gambar": [
+    {"id": 1, "bagian": "soal", "file": "figural/TIU-012/1.png",
+     "kotak": {"x": 24, "y": 104, "w": 332, "h": 92}, "lebar": 332, "tinggi": 92,
+     "data": "data:image/png;base64,iVBORw0KGgo..."},
+    {"id": 2, "bagian": "opsi A", "...": "..."}
+  ]
+}
+```
+
+`bagian` = `soal`, `opsi A`…`opsi E`, atau `pembahasan`, ditentukan dari posisi gambar
+terhadap bar pilihan jawaban. `kotak` adalah posisi gambar di dalam `file_soal`. Importer
+cukup mencocokkan `kategori` + `nomor`, lalu menempelkan `data` (atau file PNG-nya) ke bagian
+yang sesuai.
+
 ## Catatan folder
 
 Default yang dipantau adalah `C:\Users\djtzy\Pictures\Screenshots`. Jika folder Pictures Anda
