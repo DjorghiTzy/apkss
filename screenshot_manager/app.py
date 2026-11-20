@@ -769,8 +769,15 @@ class MainWindow(QMainWindow):
         self.updates.downloaded.connect(self._on_update_downloaded)
         self.updates.download_failed.connect(self._on_update_download_failed)
         self._update_dialog: QProgressDialog | None = None
+        self._update_downloading = False
+        self._pending_installer: str | None = None
+        self._update_version = ""
         if self.settings["auto_update_check"] is not False:
             QTimer.singleShot(2500, lambda: self.check_updates(silent=True))
+            self._update_timer = QTimer(self)                  # cek ulang tiap 2 jam
+            self._update_timer.setInterval(2 * 60 * 60 * 1000)
+            self._update_timer.timeout.connect(lambda: self.check_updates(silent=True))
+            self._update_timer.start()
 
     # ============================================================ UI build
     def _build_ui(self):
@@ -799,7 +806,8 @@ class MainWindow(QMainWindow):
         self.chk_top = QCheckBox("Selalu di atas")
         self.chk_top.toggled.connect(self.set_on_top)
         self.btn_update = QPushButton("Periksa Update")
-        self.btn_update.setToolTip(f"Versi terpasang: {__version__}")
+        self.btn_update.setToolTip(f"Versi terpasang: {__version__}. Update baru dipasang otomatis "
+                                   "(saat aplikasi tidak sedang menangkap).")
         self.btn_update.clicked.connect(lambda: self.check_updates(silent=False))
         top.addWidget(self.lbl_watch)
         top.addWidget(QLabel("Folder Screenshots:"))
@@ -1719,6 +1727,8 @@ class MainWindow(QMainWindow):
 
     def _on_auto_finished(self, rep, crash: str | None = None):
         self.auto_running = False
+        if self._pending_installer:
+            QTimer.singleShot(5000, self._install_when_idle)
         self.centralWidget().setEnabled(True)
         self.showNormal()
         self.raise_()
@@ -2051,6 +2061,9 @@ class MainWindow(QMainWindow):
         if not silent:
             QMessageBox.warning(self, "Periksa Update", f"Tidak bisa memeriksa update.\n\n{msg}")
 
+    def _auto_update_on(self) -> bool:
+        return self.settings["auto_update"] is not False
+
     def _on_update_checked(self, info, silent: bool):
         self._reset_update_button()
         if not updater.is_newer(info.version):
@@ -2058,6 +2071,17 @@ class MainWindow(QMainWindow):
             if not silent:
                 QMessageBox.information(self, "Periksa Update",
                                         f"Anda sudah memakai versi terbaru ({__version__}).")
+            return
+        can_install = updater.can_self_install() and info.asset_url
+        if can_install and self._auto_update_on():
+            # update otomatis: unduh di latar belakang, pasang saat aplikasi menganggur — tanpa dialog
+            if self._update_downloading or self._pending_installer:
+                return
+            self._update_downloading = True
+            self._update_version = info.version
+            self.btn_update.setText(f"Mengunduh {info.version}…")
+            self.log_event(f"Versi baru {info.version}: diunduh & dipasang otomatis", "ok")
+            self.updates.download(info)
             return
         if silent and self.settings["skip_version"] == info.version:
             return
@@ -2071,7 +2095,6 @@ class MainWindow(QMainWindow):
         box.setText(f"<b>Screenshot Manager {info.version}</b> tersedia "
                     f"(terpasang: {__version__}).<br><br>Data paket & screenshot Anda tetap aman.")
         box.setDetailedText(notes)
-        can_install = updater.can_self_install() and info.asset_url
         b_install = box.addButton("Unduh && Pasang" if can_install else "Buka Halaman Unduhan",
                                   QMessageBox.AcceptRole)
         box.addButton("Nanti", QMessageBox.RejectRole)
@@ -2085,6 +2108,34 @@ class MainWindow(QMainWindow):
                 self._start_update_download(info)
             else:
                 QDesktopServices.openUrl(QUrl(info.page_url))
+
+    def _busy(self) -> bool:
+        return bool(self.auto_running or self.setup_running or QApplication.activeModalWidget()
+                    or QApplication.activePopupWidget())
+
+    def _install_when_idle(self):
+        """Pasang installer yang sudah diunduh begitu aplikasi tidak sedang bekerja."""
+        path = self._pending_installer
+        if not path:
+            return
+        if self._busy():
+            QTimer.singleShot(30_000, self._install_when_idle)
+            return
+        self.set_banner(f"⟳ Memasang update {self._update_version}… aplikasi akan terbuka lagi sendiri.", "info")
+        self.log_event(f"Memasang update {self._update_version} otomatis", "ok")
+
+        def go():
+            if self._busy():                       # mulai bekerja dalam 3 detik terakhir: tunda lagi
+                QTimer.singleShot(30_000, self._install_when_idle)
+                return
+            try:
+                updater.launch_installer(Path(path))
+            except OSError as exc:
+                self._pending_installer = None
+                return self.error(f"Tidak bisa menjalankan installer: {exc}")
+            self.close()
+            QApplication.instance().quit()
+        QTimer.singleShot(3000, go)
 
     def _start_update_download(self, info):
         dlg = QProgressDialog(f"Mengunduh {info.asset_name}…", "Batal", 0, 100, self)
@@ -2109,11 +2160,22 @@ class MainWindow(QMainWindow):
 
     def _on_update_download_failed(self, msg: str):
         self._close_update_dialog()
+        if self._update_downloading:               # mode otomatis: coba lagi pada pengecekan berikutnya
+            self._update_downloading = False
+            self._reset_update_button()
+            self.log_event(f"Unduh update gagal, dicoba lagi nanti: {msg}", "warn")
+            return
         self.error(f"Update gagal: {msg}")
 
     def _on_update_downloaded(self, path: str):
         self._close_update_dialog()
         self.log_event(f"Installer diunduh: {path}", "ok")
+        if self._update_downloading:               # mode otomatis: pasang saat menganggur, tanpa bertanya
+            self._update_downloading = False
+            self._pending_installer = path
+            self.btn_update.setText(f"Update {self._update_version} siap")
+            self._install_when_idle()
+            return
         if QMessageBox.question(self, "Pasang update",
                                 "Installer siap. Aplikasi akan ditutup, update dipasang, lalu "
                                 "aplikasi dibuka kembali otomatis.\n\nLanjutkan sekarang?") \

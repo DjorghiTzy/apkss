@@ -4,7 +4,8 @@ name: Build Windows
 #  - GitHub web: Actions -> Build Windows -> Run workflow (centang "Terbitkan release")
 #  - Push tag vX.Y.Z
 # Versi diambil dari screenshot_manager/__init__.py (__version__).
-#  - Push biasa ke main hanya tes + build (tanpa release), hasil di Artifacts.
+#  - Push ke main dengan __version__ baru -> tes, build, dan rilis OTOMATIS (tanpa klik apa pun).
+#  - Push ke main dengan versi yang sudah dirilis -> tes + build saja (hasil di Artifacts).
 on:
   push:
     branches: [main]
@@ -39,16 +40,23 @@ jobs:
             Write-Error "Tag $env:GITHUB_REF_NAME tidak sama dengan __version__ ($v). Jalankan tools/bump_version.py dulu."
             exit 1
           }
-          $publish = ($env:GITHUB_REF_TYPE -eq "tag") -or ("${{ inputs.release }}" -eq "true")
-          "publish=$publish" >> $env:GITHUB_OUTPUT
-          if ($publish -and $env:GITHUB_REF_TYPE -ne "tag") {
-            gh release view "v$v" *> $null
-            if ($LASTEXITCODE -eq 0) {
+          gh release view "v$v" *> $null
+          $exists = ($LASTEXITCODE -eq 0)
+          $global:LASTEXITCODE = 0
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $publish = $true
+          } elseif ($env:GITHUB_EVENT_NAME -eq "push") {
+            # push ke main dengan versi baru -> rilis otomatis; versi yang sudah dirilis -> build saja
+            $publish = -not $exists
+          } else {
+            $publish = ("${{ inputs.release }}" -eq "true")
+            if ($publish -and $exists) {
               Write-Error "Release v$v sudah ada. Naikkan versi dengan tools/bump_version.py."
               exit 1
             }
-            $global:LASTEXITCODE = 0
           }
+          "publish=$publish" >> $env:GITHUB_OUTPUT
+          Write-Host "Versi $v - rilis: $publish (sudah ada: $exists)"
         env:
           GH_TOKEN: ${{ github.token }}
 

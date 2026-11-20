@@ -104,3 +104,45 @@ def test_ui_update_flow(isolated_home, monkeypatch):
     wait()
     assert shown and "terbaru" in shown[0]
     w.close()
+
+
+def test_silent_auto_update_waits_until_idle(isolated_home, monkeypatch, tmp_path):
+    import time
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    from screenshot_manager.app import MainWindow
+
+    dialogs = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: dialogs.append(self.text()) or 0)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: dialogs.append(a[2]) or QMessageBox.No)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: dialogs.append(a[2]))
+    inst = tmp_path / "ScreenshotManager-Setup-99.0.0.exe"
+    inst.write_bytes(b"MZ")
+    launched, quit_called = [], []
+    monkeypatch.setattr(updater, "fetch_latest", lambda: updater.parse_release(release_json("v99.0.0", b"MZ")))
+    monkeypatch.setattr(updater, "can_self_install", lambda: True)
+    monkeypatch.setattr(updater, "download_installer", lambda info, progress=None, cancelled=None: inst)
+    monkeypatch.setattr(updater, "launch_installer", lambda p: launched.append(p))
+    monkeypatch.setattr(QApplication, "quit", lambda *a: quit_called.append(1))
+    w = MainWindow()
+    w.show()
+
+    def wait(cond, t=8):
+        end = time.time() + t
+        while time.time() < end and not cond():
+            app.processEvents()
+            time.sleep(0.02)
+        return cond()
+
+    w.auto_running = True                         # sedang Tangkap Otomatis -> jangan pasang
+    w.check_updates(silent=True)
+    assert wait(lambda: w._pending_installer is not None)
+    app.processEvents()
+    time.sleep(3.5)
+    app.processEvents()
+    assert launched == [] and dialogs == []
+    w.auto_running = False                        # selesai -> dipasang sendiri tanpa dialog
+    w._install_when_idle()
+    assert wait(lambda: launched)
+    assert launched == [inst] and quit_called and dialogs == []
+    assert "99.0.0" in w.banner.text()

@@ -220,30 +220,26 @@ Default yang dipantau adalah `C:\Users\djtzy\Pictures\Screenshots`. Jika folder 
 dipindah ke OneDrive (`C:\Users\djtzy\OneDrive\Pictures\Screenshots`), aplikasi mencoba mendeteksinya
 otomatis; jika tidak, pilih lewat **Ganti Folder…**.
 
-## Update aplikasi
+## Update aplikasi (otomatis)
 
-- Saat dibuka, aplikasi diam-diam mengecek rilis terbaru di GitHub
-  (`github.com/DjorghiTzy/apkss/releases`). Tombol **Periksa Update** di kanan atas mengecek manual.
-- Jika ada versi baru: **Unduh & Pasang** → installer diunduh, ukuran & SHA-256 diverifikasi,
-  aplikasi menutup, update terpasang diam-diam, lalu aplikasi terbuka lagi. Paket, screenshot,
-  dan pengaturan tidak tersentuh. Ada juga pilihan **Nanti** dan **Lewati Versi Ini**.
-- Cek update butuh repo GitHub **public** (aplikasi tidak menyimpan token). Fungsi utama tetap
-  berjalan offline.
+- Aplikasi mengecek rilis terbaru di GitHub saat dibuka dan setiap 2 jam. Versi baru
+  **diunduh & dipasang sendiri tanpa dialog**: installer diverifikasi (ukuran + SHA-256), dipasang
+  diam-diam, lalu aplikasi terbuka lagi. Pemasangan ditunda selama Tangkap Otomatis / Atur
+  Otomatis berjalan atau ada dialog terbuka. Paket, screenshot, dan pengaturan tidak tersentuh.
+- Tombol **Periksa Update** mengecek seketika (perilakunya sama: langsung dipasang).
+- Matikan bila perlu dengan `"auto_update": false` di `%APPDATA%\ScreenshotManager\settings.json`.
 
-### Menerbitkan versi baru
+### Menerbitkan versi baru (otomatis)
 
-1. Naikkan versi lalu push ke `main`:
-   ```
-   python tools/bump_version.py 1.0.1
-   git commit -am "Rilis v1.0.1"
-   git push
-   ```
-2. Di GitHub: **Actions → Build Windows → Run workflow** (biarkan "Terbitkan release" tercentang).
-   Cara lain: push tag `v1.0.1`.
+```
+python tools/bump_version.py 1.0.11
+git commit -am "Rilis v1.0.11"
+git push
+```
 
-GitHub Actions lalu menjalankan tes, membuild `.exe` + installer, dan menerbitkan GitHub Release
-`v1.0.1` berisi `ScreenshotManager-Setup-1.0.1.exe` dan versi portable. Semua aplikasi yang
-terpasang akan menawarkan update tersebut.
+Push ke `main` dengan versi yang belum pernah dirilis → GitHub Actions menjalankan tes, membuild
+`.exe` + installer, dan menerbitkan GitHub Release `v1.0.11` sendiri. Push tanpa naik versi hanya
+dites & dibuild. Semua aplikasi terpasang lalu memperbarui diri otomatis.
 
 ## Pengembangan
 
