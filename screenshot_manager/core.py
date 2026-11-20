@@ -112,14 +112,14 @@ def load_image(path: str | os.PathLike) -> Image.Image:
         raise ManagerError(f"Bukan gambar yang valid: {Path(path).name} ({exc})") from exc
 
 
-def _save_png_atomic(img: Image.Image, dest: Path) -> None:
+def _save_png_atomic(img: Image.Image, dest: Path, compress_level: int = 6) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if img.mode not in ("RGB", "RGBA", "L", "LA", "P"):
         img = img.convert("RGBA")
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".png", dir=dest.parent)
     os.close(fd)
     try:
-        img.save(tmp, format="PNG", optimize=False)
+        img.save(tmp, format="PNG", optimize=False, compress_level=compress_level)
         os.replace(tmp, dest)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -271,6 +271,13 @@ class AddResult:
     item: Item
     replaced: Optional[Item] = None
     cropped: bool = False
+
+
+@dataclass
+class CaptureResult:
+    item: Item
+    image: Image.Image
+    replaced: Optional[Item] = None
 
 
 @dataclass
@@ -448,6 +455,27 @@ class Package:
         self.items.append(item)
         self.save()
         return AddResult(item, replaced, cropped)
+
+    def add_capture(self, parts: list, category: str, number: int, source: str = "otomatis") -> CaptureResult:
+        """Simpan hasil Tangkap Otomatis (bagian-bagian di memori) sekaligus: disambung & ditulis sekali."""
+        self._check_target(category, number)
+        fp_first = image_fingerprint(parts[0])
+        dup = self.find_by_fingerprint(fp_first)
+        if dup is not None:
+            raise DuplicateImageError(dup)
+        img = stitch(parts)[0] if len(parts) > 1 else parts[0].convert("RGB")
+        item = Item(id=uuid.uuid4().hex, fingerprint=image_fingerprint(img), source=source,
+                    received_at=_now(), category=category, number=int(number),
+                    width=img.width, height=img.height, parts=len(parts), part_fps=[fp_first])
+        replaced = self.find_slot(category, item.number)
+        _save_png_atomic(img, self.root / (item.relpath + ".new"), compress_level=3)
+        if replaced is not None:
+            self._backup_replaced(replaced)
+            self.items.remove(replaced)
+        os.replace(self.root / (item.relpath + ".new"), self.path_of(item))
+        self.items.append(item)
+        self.save()
+        return CaptureResult(item, img, replaced)
 
     # ---------- bagian lanjutan (soal + pembahasan yang panjang)
     def _part_files(self, item: Item) -> list[Path]:
@@ -664,6 +692,9 @@ class Package:
         names = [i.relpath for i in assigned]
         if len(set(names)) != len(names):
             raise ManagerError("Ada nama file ganda; periksa daftar")
+        counts: dict[str, int] = {}
+        for it in assigned:
+            counts[it.category] = counts.get(it.category, 0) + 1
         fig_items = []
         if figural:
             for it in assigned:
@@ -677,23 +708,32 @@ class Package:
             with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for it in assigned:
                     zf.write(self.path_of(it), arcname=it.relpath)
-                index = []
-                for it in fig_items:
-                    doc, files = self.figural_payload(it)
-                    stem = doc["id"]
-                    zf.writestr(f"figural/{stem}.json", json.dumps(doc, ensure_ascii=False, indent=2))
-                    names.append(f"figural/{stem}.json")
-                    for path, png in files:
-                        zf.writestr(path, png)
-                        names.append(path)
-                    index.append({"id": stem, "kategori": it.category, "nomor": it.number,
-                                  "file_soal": it.relpath, "json": f"figural/{stem}.json",
-                                  "jumlah_gambar": doc["jumlah_gambar"],
-                                  "bagian": [g["bagian"] for g in doc["gambar"]]})
-                if index:
-                    zf.writestr("figural/index.json", json.dumps(
-                        {"versi": 1, "paket": self.name, "soal_bergambar": index}, ensure_ascii=False, indent=2))
-                    names.append("figural/index.json")
+                if figural:
+                    # satu soal.json untuk SEMUA kategori (TWK, TIU, TKP) + gambar soal figural
+                    docs = {}
+                    for it in fig_items:
+                        doc, files = self.figural_payload(it)
+                        docs[it.id] = doc
+                        for path, png in files:
+                            zf.writestr(path, png)
+                            names.append(path)
+                    soal = []
+                    for urutan, it in enumerate(assigned, start=1):
+                        entry = {"urutan": urutan, "id": Path(it.filename).stem, "kategori": it.category,
+                                 "nomor": it.number, "file": it.relpath, "lebar": it.width, "tinggi": it.height,
+                                 "bergambar": it.id in docs}
+                        if it.id in docs:
+                            entry["gambar"] = [{"id": f"{entry['id']}-{g['id']}", "bagian": g["bagian"],
+                                                "file": g["file"], "kotak": g["kotak"], "data": g["data"]}
+                                               for g in docs[it.id]["gambar"]]
+                        soal.append(entry)
+                    jumlah = {c: n for c, n in counts.items()}
+                    jumlah["total"] = len(assigned)
+                    jumlah["bergambar"] = len(fig_items)
+                    manifest = {"versi": 2, "paket": self.name, "dibuat": _now(), "jumlah": jumlah, "soal": soal}
+                    zf.writestr("soal.json", json.dumps(manifest, ensure_ascii=False, indent=1))
+                    zf.writestr("PROMPT.txt", build_prompt(self.name, jumlah))
+                    names += ["soal.json", "PROMPT.txt"]
             with zipfile.ZipFile(tmp) as zf:  # verifikasi hasil
                 bad = zf.testzip()
                 if bad is not None:
@@ -704,11 +744,50 @@ class Package:
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
-        counts: dict[str, int] = {}
-        for it in assigned:
-            counts[it.category] = counts.get(it.category, 0) + 1
         return ZipResult(dest, counts, sum(1 for i in self.items if not i.assigned), len(assigned),
                          len(fig_items))
+
+
+def build_prompt(package: str, jumlah: dict) -> str:
+    """Satu prompt untuk mengubah SEMUA soal di ZIP (TWK, TIU, TKP sekaligus) menjadi satu JSON."""
+    rinci = ", ".join(f"{c} {n}" for c, n in jumlah.items() if c not in ("total", "bergambar"))
+    return f"""Lampiran: ZIP {package} berisi screenshot soal SKD lengkap dengan pembahasannya.
+- Folder TWK/, TIU/, TKP/: satu PNG per soal (TWK-001.png, ...). Total {jumlah['total']} soal ({rinci}).
+- soal.json: daftar SEMUA soal berurutan (id, kategori, nomor, file) + gambar untuk soal bergambar.
+- figural/: potongan gambar soal bergambar ({jumlah['bergambar']} soal).
+
+TUGAS: ubah SEMUA {jumlah['total']} soal — TWK, TIU, dan TKP SEKALIGUS — menjadi SATU JSON.
+Jangan dipisah per kategori, jangan berhenti di tengah, jangan meringkas, jangan melewatkan soal.
+Kerjakan berurutan mengikuti soal.json["soal"] dari urutan 1 sampai {jumlah['total']}.
+
+Untuk setiap entri soal.json["soal"], buka file screenshot-nya ("file") lalu isi:
+{{
+  "id": "<id dari soal.json>",
+  "kategori": "TWK" | "TIU" | "TKP",
+  "nomor": <nomor>,
+  "pertanyaan": "<teks soal lengkap>",
+  "opsi": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}},
+  "jawaban": "<huruf kunci jawaban, khusus TWK & TIU>",
+  "skor": {{"A": 0, "B": 0, "C": 0, "D": 0, "E": 0}},
+  "pembahasan": "<teks pembahasan lengkap>",
+  "gambar": ["<id gambar dari soal.json>", ...]
+}}
+
+ATURAN:
+1. Salin teks PERSIS seperti di screenshot (tanpa parafrase), termasuk angka, satuan, dan tanda baca.
+2. Kunci jawaban TWK/TIU diambil dari pembahasan ("Jawaban: X") atau opsi berwarna hijau.
+   Opsi berwarna merah adalah jawaban peserta yang salah, BUKAN kunci.
+3. TKP tidak punya satu kunci: isi "skor" tiap opsi (1–5) sesuai pembahasan; "jawaban" = opsi skor 5.
+   Untuk TWK/TIU isi "skor" dengan 5 untuk kunci dan 0 untuk lainnya.
+4. Soal bergambar ("bergambar": true di soal.json): tulis penanda [GAMBAR:<id gambar>] di posisi gambar
+   pada "pertanyaan", "opsi", atau "pembahasan" (lihat "bagian": soal / opsi A–E / pembahasan), dan cantumkan
+   id-nya di "gambar". Data gambarnya sudah ada di soal.json — jangan disalin ulang.
+5. Soal tanpa gambar: "gambar": [].
+6. Jika ada bagian yang benar-benar tidak terbaca, tetap isi yang terbaca dan tambahkan "catatan".
+
+KELUARAN: hanya satu JSON valid, tanpa teks lain:
+{{"paket": "{package}", "jumlah": {jumlah['total']}, "soal": [ ...{jumlah['total']} objek... ]}}
+"""
 
 
 def list_packages(workspace_root: str | os.PathLike) -> list[str]:

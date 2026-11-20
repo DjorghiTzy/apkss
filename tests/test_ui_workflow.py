@@ -138,7 +138,8 @@ def test_claude_workflow(win, tmp_path, monkeypatch):
     w.make_zip()
     with zipfile.ZipFile(dest) as zf:
         assert zf.testzip() is None
-        assert sorted(zf.namelist()) == ["TIU/TIU-001.png", "TKP/TKP-010.png", "TKP/TKP-011.png",
+        assert "soal.json" in zf.namelist() and "PROMPT.txt" in zf.namelist()
+        assert sorted(n for n in zf.namelist() if n.endswith(".png")) == ["TIU/TIU-001.png", "TKP/TKP-010.png", "TKP/TKP-011.png",
                                          "TWK/TWK-001.png", "TWK/TWK-002.png"]
         with Image.open(zf.open("TIU/TIU-001.png")) as im:
             assert im.getpixel((0, 0)) == (255, 255, 0)      # hasil ulangi, bukan yang lama
@@ -384,7 +385,7 @@ def test_figural_question_in_window_and_zip(win, tmp_path, monkeypatch):
     w.make_zip()
     with zipfile.ZipFile(dest) as zf:
         names = zf.namelist()
-    assert "figural/TIU-007.json" in names and "figural/index.json" in names
+    assert "soal.json" in names and "figural/TIU-007/1.png" in names
     assert not any("TIU-008" in n for n in names if n.startswith("figural/"))
 
     # tandai bukan bergambar dari menu
@@ -396,3 +397,4 @@ def test_figural_question_in_window_and_zip(win, tmp_path, monkeypatch):
     w.make_zip()
     with zipfile.ZipFile(dest) as zf:
         assert not any(n.startswith("figural/") for n in zf.namelist())
+        assert "soal.json" not in zf.namelist()

@@ -20,9 +20,9 @@ def available() -> bool:
     return sys.platform == "win32"
 
 
-def grab_screen() -> Image.Image:
-    """Tangkap layar utama dalam piksel fisik (sama seperti Win+PrtScn)."""
-    return ImageGrab.grab(all_screens=False).convert("RGB")
+def grab_screen(bbox=None) -> Image.Image:
+    """Tangkap layar utama (atau kotak bbox) dalam piksel fisik (sama seperti Win+PrtScn)."""
+    return ImageGrab.grab(bbox=bbox, all_screens=False).convert("RGB")
 
 
 class WindowsDriver:
@@ -34,8 +34,8 @@ class WindowsDriver:
         self._ctypes = ctypes
         self.u.GetAsyncKeyState(VK_ESCAPE)   # reset status "pernah ditekan"
 
-    def grab(self) -> Image.Image:
-        return grab_screen()
+    def grab(self, bbox=None) -> Image.Image:
+        return grab_screen(bbox)
 
     def move(self, x: int, y: int) -> None:
         self.u.SetCursorPos(int(x), int(y))
@@ -49,11 +49,12 @@ class WindowsDriver:
 
     def scroll(self, x: int, y: int, notches: int) -> None:
         self.move(x, y)
-        time.sleep(0.03)
-        step = 1 if notches > 0 else -1
-        for _ in range(abs(int(notches))):   # satu per satu agar halus & konsisten
-            self.u.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, step * WHEEL_DELTA, 0)  # bertanda
-            time.sleep(0.015)
+        time.sleep(0.01)
+        left = int(notches)
+        while left:                         # beberapa notch per event: cepat, tanpa jeda per notch
+            chunk = max(-10, min(10, left))
+            self.u.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, chunk * WHEEL_DELTA, 0)  # bertanda
+            left -= chunk
 
     def key(self, name: str) -> None:
         vk = KEYS[name]

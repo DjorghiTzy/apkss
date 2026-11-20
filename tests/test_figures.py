@@ -52,26 +52,31 @@ def test_zip_contains_figural_json_with_embedded_images(tmp_path):
     assert res.figural == 1
     with zipfile.ZipFile(res.path) as zf:
         names = set(zf.namelist())
-        assert {"TIU/TIU-001.png", "TIU/TIU-002.png", "figural/index.json", "figural/TIU-002.json"} <= names
+        assert {"TIU/TIU-001.png", "TIU/TIU-002.png", "soal.json", "PROMPT.txt"} <= names
         assert {f"figural/TIU-002/{i}.png" for i in range(1, 7)} <= names
-        assert not any(n.startswith("figural/TIU-001") for n in names)       # soal teks: tanpa JSON
-        doc = json.loads(zf.read("figural/TIU-002.json"))
-        assert doc["kategori"] == "TIU" and doc["nomor"] == 2 and doc["file_soal"] == "TIU/TIU-002.png"
-        assert [g["bagian"] for g in doc["gambar"]] == ["soal", "opsi A", "opsi B", "opsi C", "opsi D", "opsi E"]
-        g = doc["gambar"][0]
-        assert g["data"].startswith("data:image/png;base64,")
+        assert not any(n.startswith("figural/TIU-001") for n in names)       # soal teks: tanpa gambar
+        man = json.loads(zf.read("soal.json"))
+        assert man["jumlah"] == {"TIU": 2, "total": 2, "bergambar": 1}
+        assert [e["id"] for e in man["soal"]] == ["TIU-001", "TIU-002"]
+        e1, e2 = man["soal"]
+        assert e1["bergambar"] is False and "gambar" not in e1
+        assert e2["bergambar"] is True and e2["file"] == "TIU/TIU-002.png"
+        assert [g["bagian"] for g in e2["gambar"]] == ["soal", "opsi A", "opsi B", "opsi C", "opsi D", "opsi E"]
+        g = e2["gambar"][0]
+        assert g["id"] == "TIU-002-1" and g["data"].startswith("data:image/png;base64,")
         import base64, io
-        emb = Image.open(io.BytesIO(base64.b64decode(g["data"].split(",", 1)[1])))
-        assert emb.size == (g["lebar"], g["tinggi"])
-        assert zf.read(g["file"]) == base64.b64decode(g["data"].split(",", 1)[1])
-        idx = json.loads(zf.read("figural/index.json"))
-        assert idx["soal_bergambar"][0]["id"] == "TIU-002"
-    # tandai bukan bergambar -> tidak ada JSON
+        raw = base64.b64decode(g["data"].split(",", 1)[1])
+        assert Image.open(io.BytesIO(raw)).size == (g["kotak"]["w"], g["kotak"]["h"])
+        assert zf.read(g["file"]) == raw
+        prompt = zf.read("PROMPT.txt").decode()
+        assert "SEKALIGUS" in prompt and "2 soal" in prompt
+    # tandai bukan bergambar -> tidak ada gambar
     pkg.set_figural(it.id, False)
     res = pkg.export_zip(tmp_path / "x.zip")
     assert res.figural == 0
     with zipfile.ZipFile(res.path) as zf:
         assert not any(n.startswith("figural/") for n in zf.namelist())
+        assert json.loads(zf.read("soal.json"))["soal"][1]["bergambar"] is False
     # tanpa opsi figural di ZIP
     pkg.set_figural(it.id, True)
     res = pkg.export_zip(tmp_path / "y.zip", figural=False)

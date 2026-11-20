@@ -12,17 +12,15 @@ Berhenti: tekan ESC atau geser mouse ke pojok kiri atas layar.
 """
 from __future__ import annotations
 
-import os
-import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Callable, Optional, Protocol
 
 from PIL import Image
 
-from .core import DuplicateImageError, ManagerError, Package, apply_crop, find_overlap
+from .core import DuplicateImageError, ManagerError, Package, apply_crop, find_overlap, stitch
 
 SCROLL_TOP_NOTCHES = 60
 
@@ -130,11 +128,12 @@ class NavConfig:
 class RunConfig:
     crop: dict
     nav: NavConfig
-    wait_load: float = 1.5
-    max_parts: int = 25
+    wait_load: float = 1.5          # batas tunggu halaman berganti (bukan jeda tetap)
+    max_parts: int = 30
     notches: Optional[int] = None   # None = kalibrasi otomatis
-    stable_timeout: float = 8.0
-    stable_interval: float = 0.3
+    stable_timeout: float = 6.0     # batas tunggu layar diam
+    stable_interval: float = 0.03   # jeda antar pemeriksaan layar
+    step_ratio: float = 0.8         # langkah scroll ~80% tinggi area (sisanya tumpang tindih)
 
 
 @dataclass
@@ -144,6 +143,9 @@ class Report:
     stopped: bool = False
     aborted: Optional[str] = None
     notches: Optional[int] = None
+    seconds: float = 0.0
+    captured: int = 0                              # soal yang benar-benar diambil di sesi ini
+    crop: Optional[dict] = None                    # area potong yang diperbaiki (diperlebar) selama berjalan
 
 
 # ---------------------------------------------------------------- runner
@@ -156,7 +158,11 @@ class AutoCapture:
         self.progress = progress
         self.stop_event = stop_event or threading.Event()
         self.notches = cfg.notches
+        self.px_per_notch: Optional[float] = None
+        self.step_px = 0                       # pergeseran terbesar yang pernah teramati
         self._shown_cat: Optional[str] = None
+        self._grids: dict = {}                 # kategori -> (GridInfo, offset) grid nyata di layar
+        self._at_top = False
         cats = [c for c, n in plan.sections if int(n) > 0]
         cfg.nav.validate(cats)
         if not (cfg.crop and cfg.crop.get("rect") and cfg.crop.get("screen")):
@@ -168,18 +174,20 @@ class AutoCapture:
             need = max((int(n) for _, n in plan.sections), default=1) if nav.per_category else plan.total
             problem = nav.grid_problem(need, (sw, sh))
             if problem:
-                raise AutoCaptureError(f"Posisi Daftar Soal salah: {problem}. Buka ⚡ Tangkap Otomatis → "
-                                       "“Tandai Posisi di Layar…” dan tandai ulang (titik tandaan: "
-                                       f"{nav.grid_first}, {nav.grid_second}, {nav.grid_below}).")
+                raise AutoCaptureError(f"Posisi Daftar Soal salah: {problem}. Jalankan 🪄 Atur Otomatis lagi "
+                                       f"(titik tandaan: {nav.grid_first}, {nav.grid_second}, {nav.grid_below}).")
+        self.rect = (x, y, w, h)
         self.area_h = h
         self.center = (x + w // 2, y + h // 2)
         # parkir mouse di luar area potong (tidak di pojok kiri atas = tombol berhenti)
         self.park = (min(sw - 3, x + w + 20), y + h // 2) if x + w + 25 < sw else (x + w // 2, min(sh - 3, y + h + 20))
         if x + w + 25 >= sw and y + h + 25 >= sh:
             self.park = (max(3, x - 20), y + h // 2) if x > 25 else (sw - 3, sh - 3)
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="sm-auto-"))
+        self._region_ok: Optional[bool] = None
+        self._bg = None
+        self._edge_unfixable = False
 
-    # ------------------------------------------------------------ helpers
+    # ------------------------------------------------------------ dasar
     def _check(self):
         if self.stop_event.is_set() or self.d.stop_requested():
             raise StopRequested()
@@ -191,52 +199,96 @@ class AutoCapture:
             left = end - time.monotonic()
             if left <= 0:
                 return
-            self.d.sleep(min(0.1, left))
+            self.d.sleep(min(0.05, left))
 
     def _crop(self, img: Image.Image) -> Image.Image:
         out, ok = apply_crop(img, self.cfg.crop)
         if not ok:
             sw, sh = self.cfg.crop["screen"]
             raise AutoCaptureError(f"Ukuran layar {img.width}×{img.height} berbeda dengan acuan "
-                                   f"{sw}×{sh}. Atur ulang area potong.")
+                                   f"{sw}×{sh}. Jalankan 🪄 Atur Otomatis lagi.")
         return out.convert("RGB")
 
-    def _stable(self) -> Image.Image:
-        """Tangkap sampai dua tangkapan berturut-turut identik (halaman selesai dimuat/di-scroll)."""
-        self.d.move(*self.park)
-        prev = self._crop(self.d.grab())
-        end = time.monotonic() + self.cfg.stable_timeout
-        while time.monotonic() < end:
-            self._sleep(self.cfg.stable_interval)
-            cur = self._crop(self.d.grab())
-            if cur.tobytes() == prev.tobytes():
-                return cur
-            prev = cur
-        return prev
+    def _grab_area(self) -> Image.Image:
+        """Potret hanya area soal bila driver mendukung (lebih cepat), selain itu layar penuh lalu potong."""
+        x, y, w, h = self.rect
+        if self._region_ok is not False:
+            try:
+                img = self.d.grab(bbox=(x, y, x + w, y + h))
+                if img.size == (w, h):
+                    self._region_ok = True
+                    return img.convert("RGB")
+                self._region_ok = False
+                return self._crop(img)
+            except TypeError:
+                self._region_ok = False
+        return self._crop(self.d.grab())
 
-    def _save_tmp(self, img: Image.Image) -> Path:
-        fd, p = tempfile.mkstemp(suffix=".png", dir=self.tmpdir)
-        os.close(fd)
-        img.save(p, "PNG")
-        return Path(p)
+    def _wait_change(self, before: Optional[bytes], first_timeout: float, settle: float,
+                     need_same: int = 2) -> Optional[Image.Image]:
+        """Tunggu sampai area soal BERUBAH dari `before` lalu DIAM (need_same tangkapan sama berturut-turut).
+
+        None = tidak ada perubahan dalam first_timeout."""
+        t0 = time.monotonic()
+        changed = before is None
+        last = None
+        last_img = None
+        same = 0
+        while True:
+            self._check()
+            cur = self._grab_area()
+            b = cur.tobytes()
+            now = time.monotonic()
+            if not changed:
+                if b != before:
+                    changed, last, last_img, same = True, b, cur, 0
+                elif now - t0 > first_timeout:
+                    return None
+            else:
+                if b == last:
+                    same += 1
+                    if same >= need_same:
+                        return last_img
+                else:
+                    last, last_img, same = b, cur, 0
+                if now - t0 > first_timeout + settle:
+                    return last_img
+            self._sleep(self.cfg.stable_interval)
+
+    def _stable(self) -> Image.Image:
+        self.d.move(*self.park)
+        return self._wait_change(None, 0, self.cfg.stable_timeout)
+
+    # ------------------------------------------------------------ navigasi
+    def _scroll_top(self):
+        if self._at_top:
+            return
+        before = self._grab_area().tobytes()
+        self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)
+        self.d.move(*self.park)
+        self._wait_change(before, 0.25, self.cfg.stable_timeout)
+        self._at_top = True
 
     def _select_category(self, cat: str):
         nav = self.cfg.nav
         opt = nav.category_options.get(cat)
+        self._grids.pop(cat, None)
         if not (nav.category_dropdown and opt):
             self.progress(f"  Tipe Soal {cat} tidak diatur — memakai tipe yang sedang tampil")
             self._shown_cat = cat
             return
         self.progress(f"  memilih Tipe Soal {cat}")
-        self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)
-        self._sleep(0.4)
+        self._scroll_top()
         self.d.click(*nav.category_dropdown)
-        self._sleep(0.8)
+        self._sleep(0.35)
         self.d.click(*opt)
-        self._sleep(max(0.8, self.cfg.wait_load))
+        self.d.move(*self.park)
+        self._sleep(0.2)
+        self._wait_change(None, 0, max(1.0, self.cfg.wait_load))
+        self._at_top = False
+        self._scroll_top()
         self._shown_cat = cat
 
-    # ------------------------------------------------------------ grid nyata di layar
     def _grid_region(self):
         nav = self.cfg.nav
         x0, y0 = nav.grid_first
@@ -248,210 +300,305 @@ class AutoCapture:
         top = max(0, int(y0 - 3 * dy))
         return left, top, right, sh, dx, dy
 
-    def _detect_live_grid(self, img=None):
-        """Cari grid Daftar Soal yang sedang tampil (posisi bisa sedikit berbeda tiap kategori)."""
+    def _detect_live_grid(self):
+        """Grid Daftar Soal yang sedang tampil (posisi bisa sedikit berbeda tiap kategori)."""
         from .autosetup import GridInfo, detect_grid
         nav = self.cfg.nav
         left, top, right, bottom, dx, dy = self._grid_region()
-        img = img if img is not None else self.d.grab()
-        sub = img.crop((left, top, right, bottom))
+        try:
+            img = self.d.grab(bbox=(left, top, right, bottom))
+            if img.size != (right - left, bottom - top):
+                img = img.crop((left, top, right, bottom))
+        except TypeError:
+            img = self.d.grab().crop((left, top, right, bottom))
         box = int(0.7 * min(dx, dy))
         hint = GridInfo((nav.grid_first[0] - left, nav.grid_first[1] - top), dx, dy, nav.columns, 1, box,
                         (0, 0, 0, 0))
-        g = detect_grid(sub, hint=hint)
+        g = detect_grid(img, hint=hint)
         if g is None or g.cols != nav.columns:
-            return None, (left, top)
-        return g, (left, top)
+            return None, (left, top), img
+        return g, (left, top), img
 
-    def _current_index(self, img, g, off) -> Optional[int]:
-        """Nomor soal aktif = tombol berwarna oranye/berbeda di grid (None bila tak terlihat)."""
+    def _current_index(self, img, g) -> Optional[int]:
+        """Nomor soal aktif = satu-satunya tombol berwarna lain (oranye) di grid."""
         import numpy as np
         a = np.asarray(img.convert("RGB"), dtype=np.int16)
         cols = []
         for n in range(1, g.count + 1):
             x, y = g.position(n)
-            x, y = x + off[0], y + off[1]
             r = max(2, g.box // 4)
             patch = a[max(0, y - r):y + r, max(0, x - r):x + r].reshape(-1, 3)
             if len(patch) == 0:
                 return None
             cols.append(np.median(patch, axis=0))
         cols = np.array(cols)
-        common = np.median(cols, axis=0)
-        dist = np.abs(cols - common).max(axis=1)
+        dist = np.abs(cols - np.median(cols, axis=0)).max(axis=1)
         k = int(dist.argmax())
         if dist[k] < 40 or (dist > 40).sum() != 1:
             return None
         return k + 1
 
-    def _click_number(self, n: int):
-        """Klik tombol nomor n pada grid yang benar-benar terlihat; verifikasi lewat tombol aktif."""
+    def _number_pos(self, cat: str, n: int, refresh: bool = False):
         nav = self.cfg.nav
-        for attempt in range(3):
-            self.d.move(*self.park)
-            self._sleep(0.15)
-            img = self.d.grab()
-            g, off = self._detect_live_grid(img)
-            if g is not None and g.count < n:                 # baris bawah tak terlihat: geser sedikit
-                self.d.scroll(*self.center, -3)
-                self._sleep(0.4)
-                img = self.d.grab()
-                g, off = self._detect_live_grid(img)
-            if g is not None and g.count >= n:
-                x, y = g.position(n)
-                pos = (x + off[0], y + off[1])
-            else:
-                pos = nav.grid_position(n)
-                if attempt == 0:
-                    self.progress("  grid tidak terdeteksi ulang, memakai posisi tersimpan")
-            self.d.click(*pos)
-            self.d.move(*self.park)
-            self._sleep(max(0.4, min(1.0, self.cfg.wait_load)))
-            if g is None:
-                return
-            after = self.d.grab()
-            g2, off2 = self._detect_live_grid(after)
-            cur = self._current_index(after, g2, off2) if g2 is not None else None
-            if cur is None or cur == n:
-                return
-            self.progress(f"  klik nomor {n} belum berpindah (aktif: {cur}), ulangi")
-        # biarkan pengecekan duplikat yang memutuskan
+        key = cat if nav.per_category else "*"
+        if refresh or key not in self._grids:
+            g, off, _ = self._detect_live_grid()
+            self._grids[key] = (g, off)
+        g, off = self._grids[key]
+        if g is not None and g.count >= n:
+            x, y = g.position(n)
+            return x + off[0], y + off[1]
+        return tuple(nav.grid_position(n))
 
-    def _navigate(self, g: int, first: bool, cat: str = "", local: int = 0, force_cat: bool = False):
+    def _open_question(self, cat: str, n: int, g_index: int, first: bool) -> Image.Image:
+        """Buka soal & kembalikan tangkapan pertamanya (bagian atas), sudah dipastikan berganti."""
         nav = self.cfg.nav
-        if nav.mode == "grid":
-            if nav.per_category and (force_cat or cat != self._shown_cat):
-                self._select_category(cat)
-            self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)   # grid di posisi awal
-            self._sleep(0.3)
-            self._click_number(local if nav.per_category else g)
-        elif not first:
-            if nav.mode == "point":
-                self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)
-                self._sleep(0.3)
+        if nav.mode == "grid" and nav.per_category and cat != self._shown_cat:
+            self._select_category(cat)
+        self._scroll_top()
+        before = self._grab_area().tobytes()
+        target = n if (nav.mode != "grid" or nav.per_category) else g_index
+        for attempt in range(3):
+            if nav.mode == "grid":
+                self.d.click(*self._number_pos(cat, target, refresh=attempt > 0))
+            elif nav.mode == "point":
+                if first and attempt == 0:
+                    return self._stable()
                 self.d.click(*nav.point)
             else:
+                if first and attempt == 0:
+                    return self._stable()
                 self.d.key(nav.key)
-        self._sleep(self.cfg.wait_load)
-        self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)
+            self.d.move(*self.park)
+            img = self._wait_change(before, max(0.8, self.cfg.wait_load), self.cfg.stable_timeout, need_same=3)
+            if img is not None:
+                self._at_top = True                        # diklik saat di atas -> soal baru mulai di atas
+                return img
+            if nav.mode == "grid":                         # tidak berubah: mungkin memang sudah di soal itu
+                g, off, gimg = self._detect_live_grid()
+                cur_idx = None
+                if g is not None:
+                    self._grids[cat if nav.per_category else "*"] = (g, off)
+                    cur_idx = self._current_index(gimg, g)
+                if cur_idx == target:
+                    return self._stable()
+                if cur_idx is None:
+                    shown = self._stable()
+                    from .core import image_fingerprint
+                    if self.pkg.find_by_fingerprint(image_fingerprint(shown)) is None:
+                        self.progress(f"  {cat} nomor {n} sudah tampil")
+                        return shown
+            self.progress(f"  halaman belum berganti, klik ulang ({attempt + 1}/3)")
+            if nav.mode == "grid" and nav.per_category and attempt == 1:
+                self._select_category(cat)
+                self._scroll_top()
+                before = self._grab_area().tobytes()
+        raise AutoCaptureError(f"Soal {cat} nomor {n} gagal dibuka: halaman tidak berganti setelah 3 kali klik. "
+                               "Jalankan 🪄 Atur Otomatis lagi.")
+
+    # ------------------------------------------------------------ satu soal
+    def _scroll_parts(self, first: Image.Image, notches: int, max_steps: int = 10_000) -> tuple[list, bool, bool]:
+        """Scroll ke bawah sampai habis. Kembalikan (bagian, ada_celah, sudah_di_dasar)."""
+        parts = [first]
+        h = self.area_h
+        gap = False
+        steps = 0
+        while len(parts) < self.cfg.max_parts:
+            if steps >= max_steps:
+                return parts, gap, False
+            steps += 1
+            last = parts[-1]
+            self.d.scroll(*self.center, -notches)
+            self.d.move(*self.park)
+            cur = self._wait_change(last.tobytes(), 0.3, self.cfg.stable_timeout)
+            if cur is None:
+                return parts, gap, True                    # tidak bergeser lagi: sudah paling bawah
+            self._at_top = False
+            k = find_overlap(last, cur)
+            if k == 0:
+                parts.append(cur)
+                return parts, True, False
+            shift = h - k
+            parts.append(cur)
+            if self.px_per_notch is None:
+                self.px_per_notch = shift / notches
+            if shift > self.step_px:
+                self.step_px = shift
+            elif shift < 0.9 * self.step_px:
+                return parts, gap, True                    # pergeseran terpotong: dasar halaman
+        return parts, gap, True
+
+    def _capture_question(self, first: Image.Image, name: str, rep: Report) -> list:
+        """Ambil semua bagian satu soal (soal sampai akhir pembahasan)."""
+        if self.notches is None:                           # kalibrasi: 1 notch = berapa piksel?
+            parts, gap, bottom = self._scroll_parts(first, 1, max_steps=1)
+            if self.px_per_notch:
+                self.notches = max(1, int(self.area_h * self.cfg.step_ratio // self.px_per_notch))
+                self.step_px = 0
+                self.progress(f"  kalibrasi: 1 notch ≈ {self.px_per_notch:.0f}px → {self.notches} notch per langkah")
+                if not gap and not bottom:
+                    more, gap, _ = self._scroll_parts(parts[-1], self.notches)
+                    parts += more[1:]
+            elif not gap:
+                return parts                               # halaman tidak bisa di-scroll
+        else:
+            parts, gap, _ = self._scroll_parts(first, self.notches)
+        tries = 0
+        while gap and tries < 2:                           # ada bagian terlewat: ulangi, langkah lebih kecil
+            tries += 1
+            self.notches = max(1, int(self.notches * 0.6))
+            self.step_px = 0
+            rep.problems.append((name, f"langkah scroll terlalu besar, diulang ({self.notches} notch)"))
+            self._at_top = False
+            self._scroll_top()
+            start = self._stable()
+            parts, gap, _ = self._scroll_parts(start, self.notches)
+        if gap:
+            rep.problems.append((name, "ada bagian yang tidak bertumpang tindih — periksa gambar"))
+        return parts
+
+    # ------------------------------------------------------------ jaga agar tidak terpotong
+    def _edge_ink(self, img: Image.Image) -> tuple[bool, bool]:
+        """Apakah tulisan menyentuh tepi kiri / kanan area (tanda terpotong)?"""
+        import numpy as np
+        a = np.asarray(img, dtype=np.int16)
+        if self._bg is None:
+            smp = a[::7, ::7].reshape(-1, 3)
+            vals, cnt = np.unique(smp, axis=0, return_counts=True)
+            self._bg = vals[cnt.argmax()]
+        dark_l = (np.abs(a[:, :2] - self._bg).max(axis=2) > 60).sum()
+        dark_r = (np.abs(a[:, -2:] - self._bg).max(axis=2) > 60).sum()
+        return dark_l >= 2, dark_r >= 2
+
+    def _widen(self, left: bool, right: bool) -> bool:
+        """Lebarkan area sampai kolom polos terdekat di layar. True bila berhasil."""
+        import numpy as np
+        x, y, w, h = self.rect
+        sw, sh = self.cfg.crop["screen"]
+        scr = np.asarray(self.d.grab().convert("RGB"), dtype=np.int16)
+        if scr.shape[1] != sw:
+            return False
+        band = scr[y:y + h]
+        bg = self._bg if self._bg is not None else np.array([255, 255, 255])
+        limit_r = sw
+        if self.cfg.nav.mode == "grid":
+            limit_r = int(self.cfg.nav.grid_first[0] - abs(self.cfg.nav.grid_second[0] - self.cfg.nav.grid_first[0]) / 2)
+
+        plain_cols = (np.abs(band - bg).max(axis=2) <= 10).all(axis=0)
+        RUN = 12                                   # ruang kosong sungguhan, bukan celah antar huruf
+
+        def find(start, stop, step):
+            run = 0
+            for cx in range(start, stop, step):
+                run = run + 1 if plain_cols[cx] else 0
+                if run >= RUN:
+                    return cx - step * (RUN - 1)   # kolom kosong pertama
+            return None
+        x0, x1 = x, x + w - 1
+        ok = True
+        if right:
+            nx = find(x1 + 1, min(limit_r, x1 + 400, sw), 1)
+            ok &= nx is not None
+            if nx is not None:
+                x1 = min(sw - 1, nx + 2)
+        if left:
+            nx = find(x0 - 1, max(-1, x0 - 400), -1)
+            ok &= nx is not None
+            if nx is not None:
+                x0 = max(0, nx - 2)
+        if (x0, x1) == (x, x + w - 1):
+            return False
+        self.rect = (x0, y, x1 - x0 + 1, h)
+        crop = dict(self.cfg.crop)
+        crop["rect"] = list(self.rect)
+        self.cfg.crop = crop
+        self.center = (x0 + (x1 - x0) // 2, y + h // 2)
+        self._region_ok = None
+        self.progress(f"  area diperlebar agar tidak terpotong: x {x}→{x0}, lebar {w}→{x1 - x0 + 1}px")
+        return ok
 
     # ------------------------------------------------------------ main
     def run(self) -> Report:
         rep = Report()
-        self._current: Optional[str] = None     # soal yang sedang ditangkap (belum lengkap)
+        t_start = time.monotonic()
         entries = self.plan.entries()
         if not entries:
             raise AutoCaptureError("Rencana soal kosong")
+        figs = ThreadPoolExecutor(max_workers=1)
+        pending = {}
+        from .figures import detect_figures
         try:
-            prev_first: Optional[bytes] = None
             started = False
             for idx, (g, cat, num, local) in enumerate(entries):
                 self._check()
                 name = f"{cat}-{num:03d}"
                 if self.pkg.find_slot(cat, num) is not None:     # sudah lengkap sebelumnya
                     rep.done.append(f"{name}.png")
-                    self.progress(f"[{idx + 1}/{len(entries)}] {name} sudah ada, dilewati")
                     continue
-                self.progress(f"[{idx + 1}/{len(entries)}] {name}: membuka {cat} nomor {local}")
-                item_id, first_bytes, existed = self._capture_first(g, cat, num, not started, prev_first,
-                                                                    rep, local)
+                t_q = time.monotonic()
+                first = self._open_question(cat, local, g, not started)
                 started = True
-                prev_first = first_bytes
-                if existed:
-                    rep.done.append(f"{name}.png")
-                    self.progress(f"[{idx + 1}/{len(entries)}] {name} sudah ada, dilewati")
-                    continue
-                self._current = item_id
-                self._capture_rest(item_id, name, rep)
-                self._current = None
-                if self.pkg.update_figures(item_id):
-                    self.progress(f"  🖼 soal bergambar: {len(self.pkg.get(item_id).figures)} gambar")
-                it = self.pkg.get(item_id)
+                parts = self._capture_question(first, name, rep)
+                for _ in range(2):                         # tulisan menyentuh tepi -> lebarkan & ulangi
+                    edges = [self._edge_ink(p) for p in parts]
+                    lft, rgt = any(e[0] for e in edges), any(e[1] for e in edges)
+                    if not (lft or rgt) or self._edge_unfixable:
+                        break
+                    if not self._widen(lft, rgt):
+                        self._edge_unfixable = True
+                        rep.problems.append((name, "tulisan menyentuh tepi area — mungkin terpotong"))
+                        break
+                    rep.crop = dict(self.cfg.crop)
+                    self._at_top = False
+                    self._scroll_top()
+                    parts = self._capture_question(self._stable(), name, rep)
+                self._at_top = len(parts) == 1
+                try:
+                    res = self.pkg.add_capture(parts, cat, num, source=f"otomatis:{cat} {local}")
+                except DuplicateImageError as exc:
+                    raise AutoCaptureError(
+                        f"Soal {cat} nomor {local} ({name}) gagal: tampilannya sama dengan "
+                        f"{exc.existing.display_name} yang sudah tersimpan (navigasi tidak berpindah). "
+                        "Jalankan 🪄 Atur Otomatis lagi.") from exc
+                it = res.item
+                pending[it.id] = figs.submit(detect_figures, res.image)
                 rep.done.append(it.filename)
-                self.progress(f"[{idx + 1}/{len(entries)}] ✔ {it.filename} ({it.parts} bagian, "
-                              f"{it.width}×{it.height}px)")
+                rep.captured += 1
+                self.progress(f"[{idx + 1}/{len(entries)}] ✔ {it.filename} ({len(parts)} bagian, "
+                              f"{time.monotonic() - t_q:.1f} dtk)")
+                self._apply_figures(pending, wait=False)
         except StopRequested:
             rep.stopped = True
         except AutoCaptureError as exc:
             rep.aborted = str(exc)
         finally:
-            if self._current is not None:        # jangan tinggalkan soal setengah jadi
-                try:
-                    gone = self.pkg.remove(self._current)
-                    self.progress(f"{gone.filename} belum lengkap, dibuang (akan diambil ulang)")
-                except ManagerError:
-                    pass
+            if pending:
+                self.progress("Memeriksa soal bergambar…")
+            self._apply_figures(pending, wait=True)
+            figs.shutdown(wait=True)
             rep.notches = self.notches
-            for f in self.tmpdir.glob("*"):
-                f.unlink(missing_ok=True)
-            self.tmpdir.rmdir()
+            rep.seconds = time.monotonic() - t_start
         return rep
 
-    def _capture_first(self, g, cat, num, first, prev_first, rep, local=0):
-        """Kembalikan (item_id, bytes tangkapan pertama, sudah_ada_sebelumnya)."""
-        last_dup = None
-        for attempt in range(3):
-            self._navigate(g, first and attempt == 0, cat, local or num, force_cat=attempt > 0)
-            img = self._stable()
-            if prev_first is not None and img.tobytes() == prev_first:
-                self.progress(f"  halaman belum berganti, coba lagi ({attempt + 1}/3)")
-                self._sleep(1.0 + attempt)
+    def _apply_figures(self, pending: dict, wait: bool):
+        changed = False
+        for item_id in list(pending):
+            fut = pending[item_id]
+            if not wait and not fut.done():
                 continue
+            pending.pop(item_id)
             try:
-                res = self.pkg.add_image(self._save_tmp(img), cat, num)
-            except DuplicateImageError as exc:
-                ex = exc.existing
-                if ex.category == cat and ex.number == num:     # sudah ditangkap sebelumnya
-                    return ex.id, img.tobytes(), True
-                last_dup = ex.display_name
-                self.progress(f"  sama dengan {last_dup}, coba lagi ({attempt + 1}/3)")
-                self._sleep(1.0 + attempt)
+                result = fut.result()
+            except Exception:  # noqa: BLE001
+                result = []
+            try:
+                it = self.pkg.get(item_id)
+            except ManagerError:
                 continue
-            if res.replaced is not None:
-                rep.problems.append((res.item.filename, "menggantikan gambar lama dengan nomor sama"))
-            return res.item.id, img.tobytes(), False
-        why = (f"tampilannya sama dengan {last_dup} yang sudah tersimpan (navigasi tidak berpindah, "
-               f"atau soal ini sudah disimpan sebagai {last_dup})" if last_dup else "halaman tidak berganti")
-        raise AutoCaptureError(f"Soal {cat} nomor {local or num} ({cat}-{num:03d}) gagal: {why}. "
-                               "Periksa posisi grid / Tipe Soal.")
-
-    def _scroll_down_and_grab(self, notches: int) -> Image.Image:
-        self.d.scroll(*self.center, -notches)
-        return self._stable()
-
-    def _capture_rest(self, item_id: str, name: str, rep: Report):
-        item = self.pkg.get(item_id)
-        with Image.open(self.pkg.path_of(item)) as im:
-            last = im.convert("RGB")
-        if self.notches is None:   # kalibrasi: 1 notch = berapa piksel?
-            cur = self._scroll_down_and_grab(1)
-            if cur.tobytes() == last.tobytes():
-                return            # halaman tidak bisa di-scroll; kalibrasi di soal berikutnya
-            k = find_overlap(last, cur)
-            shift = self.area_h - k if k else 0
-            if shift <= 0:
-                self.notches = 2
-                rep.problems.append((name, "kalibrasi scroll gagal, memakai 2 notch"))
-            else:
-                self.notches = max(1, int(self.area_h * 0.6 // shift))
-            self.progress(f"  kalibrasi: 1 notch ≈ {shift}px → {self.notches} notch per langkah")
-            res = self.pkg.append_part(item_id, self._save_tmp(cur))
-            last = cur
-        while True:
-            self._check()
-            if self.pkg.get(item_id).parts >= self.cfg.max_parts:
-                rep.problems.append((name, f"dihentikan di {self.cfg.max_parts} bagian (batas)"))
-                return
-            cur = self._scroll_down_and_grab(self.notches)
-            if cur.tobytes() == last.tobytes():
-                return            # sudah paling bawah
-            try:
-                res = self.pkg.append_part(item_id, self._save_tmp(cur))
-            except ManagerError as exc:
-                rep.problems.append((name, f"bagian dilewati: {exc}"))
-                return
-            if res.overlap_rows == 0:
-                rep.problems.append((name, f"bagian {res.part_number} tidak bertumpang tindih — "
-                                           "mungkin ada celah, periksa gambar"))
-            self.progress(f"  bagian {res.part_number} disambung")
-            last = cur
+            if not it.figures_off:
+                it.figures, it.figures_checked = result, True
+                changed = True
+                if result:
+                    self.progress(f"  🖼 {it.filename}: soal bergambar, {len(result)} gambar")
+        if changed:
+            self.pkg.save()

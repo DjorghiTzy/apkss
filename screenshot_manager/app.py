@@ -847,9 +847,10 @@ class MainWindow(QMainWindow):
         self.btn_zip.clicked.connect(self.make_zip)
         zipbox.addWidget(self.lbl_counts)
         zipbox.addWidget(self.btn_zip)
-        self.chk_figural = QCheckBox("Sertakan soal bergambar (JSON + gambar)")
-        self.chk_figural.setToolTip("Untuk soal yang berisi gambar (figural), ZIP juga berisi folder figural/: "
-                                    "JSON per soal dengan gambar base64 + file PNG tiap gambar.")
+        self.chk_figural = QCheckBox("Sertakan soal.json + PROMPT (semua kategori)")
+        self.chk_figural.setToolTip("ZIP juga berisi soal.json (SEMUA soal TWK, TIU, TKP dalam satu file, "
+                                    "termasuk gambar soal bergambar sebagai base64), PROMPT.txt (satu prompt "
+                                    "untuk semua soal), dan folder figural/ berisi potongan gambar.")
         zipbox.addWidget(self.chk_figural)
         bottom.addLayout(zipbox)
         outer.addLayout(bottom)
@@ -1723,6 +1724,11 @@ class MainWindow(QMainWindow):
         if rep is None:
             self.error(f"Tangkap Otomatis berhenti karena kesalahan: {crash}")
             return
+        if rep.crop:                                   # area diperlebar agar tidak terpotong: simpan
+            self.settings["crop"] = dict(rep.crop)
+            self._refresh_crop_label()
+            self.log_event(f"Area potong diperbaiki & disimpan: {rep.crop['rect']}", "ok")
+        speed = (f" · {rep.seconds / rep.captured:.1f} dtk/soal" if rep.captured else "")
         status = ("dihentikan (ESC / pojok layar)" if rep.stopped else
                   f"BERHENTI: {rep.aborted}" if rep.aborted else "SELESAI")
         kind = "ok" if not rep.aborted and not rep.stopped else "warn"
@@ -1731,7 +1737,7 @@ class MainWindow(QMainWindow):
         self.log_event(f"Tangkap Otomatis {status}: {len(rep.done)} soal", kind)
         for name, msg in rep.problems:
             self.log_event(f"Perlu dicek {name}: {msg}", "warn")
-        text = f"Status: {status}\nTersimpan: {len(rep.done)} soal"
+        text = f"Status: {status}\nTersimpan: {len(rep.done)} soal ({rep.captured} diambil sesi ini{speed})"
         if rep.done:
             text += f" ({rep.done[0]} … {rep.done[-1]})"
         if rep.problems:
@@ -2014,7 +2020,8 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("ZIP berhasil dibuat")
         box.setText(f"{res.path}\n\n{res.total} gambar: {detail}"
-                    + (f"\n🖼 {res.figural} soal bergambar → folder figural/ (JSON + gambar)" if res.figural else "")
+                    + ("\n📄 soal.json (semua kategori) + PROMPT.txt ikut di dalam ZIP" if self.chk_figural.isChecked() else "")
+                    + (f"\n🖼 {res.figural} soal bergambar (gambar ada di soal.json & figural/)" if res.figural else "")
                     + (f"\n{res.skipped_unassigned} gambar tanpa nomor dilewati." if res.skipped_unassigned else ""))
         b_open = box.addButton("Buka Folder", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Ok)

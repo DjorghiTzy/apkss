@@ -146,10 +146,16 @@ class FakeAlfaiz:
     CATS = ["TWK", "TIU", "TKP"]
 
     def __init__(self, counts, height_of=lambda cat, n: 900 + (n * 173) % 1500, start_cat="TWK",
-                 px_per_notch=53, dy_extra=None):
+                 px_per_notch=53, dy_extra=None, load_s=0.0, anim_s=0.0, full_text=False,
+                 card_border=False, sidebar_border=True):
         self.counts = counts
+        self.card_border, self.sidebar_border = card_border, sidebar_border
+        self.load_s, self.anim_s = load_s, anim_s          # latensi meniru browser asli
+        self._load_until = 0.0
+        self._anim = None                                  # (t0, dari_y, ke_y)
         self.dy_extra = dy_extra or {}          # grid kategori tertentu sedikit lebih renggang
-        self.pages = {(c, n): make_page(1000 * (i + 1) + n, height_of(c, n))
+        mk = make_full_page if full_text else make_page
+        self.pages = {(c, n): mk(1000 * (i + 1) + n, height_of(c, n))
                       for i, c in enumerate(self.CATS) if c in counts for n in range(1, counts[c] + 1)}
         self.cat, self.n, self.scroll_y, self.open = start_cat, 1, 0, False
         self.px = px_per_notch
@@ -165,8 +171,20 @@ class FakeAlfaiz:
         scr = Image.new("RGB", (W, H), "white")
         d = ImageDraw.Draw(scr)
         x, y, w, h = self.CONTENT
-        page = self.pages[(self.cat, self.n)]
-        part = page.crop((0, self.scroll_y, w, min(page.height, self.scroll_y + h)))
+        import time as _t
+        now = _t.monotonic()
+        sy = self.scroll_y
+        if self._anim is not None:                         # animasi scroll halus
+            t0, a, b_ = self._anim
+            f = min(1.0, (now - t0) / self.anim_s) if self.anim_s else 1.0
+            sy = round(a + (b_ - a) * f)
+            if f >= 1.0:
+                self._anim = None
+        if now < self._load_until:                         # halaman baru belum selesai dimuat
+            page = self.pages[getattr(self, "_prev_page", (self.cat, self.n))]
+        else:
+            page = self.pages[(self.cat, self.n)]
+        part = page.crop((0, sy, w, min(page.height, sy + h)))
         scr.paste(part, (x, y))
         d.rectangle([0, 0, W, 60], fill="#202124")                     # toolbar browser
         d.text((300, 25), "casn.privatalfaiz.id/#!/ujian/pembahasan", fill="#ddd")
@@ -175,7 +193,11 @@ class FakeAlfaiz:
         d.rectangle([0, H - 40, W, H], fill="#1b1b2b")                  # taskbar
         for i in range(8):
             d.rectangle([500 + i * 48, H - 32, 524 + i * 48, H - 8], fill=(60 + 20 * i, 120, 200))
-        d.rounded_rectangle([1085, 110, 1345, 640], radius=12, outline=(225, 225, 225), fill="white")
+        if self.card_border:                                          # tepi kartu soal (tipis)
+            d.line([x - 9, y, x - 9, y + h - 1], fill=(228, 228, 228))
+            d.line([x + w + 8, y, x + w + 8, y + h - 1], fill=(228, 228, 228))
+        d.rounded_rectangle([1085, 110, 1345, 640], radius=12,
+                            outline=(225, 225, 225) if self.sidebar_border else "white", fill="white")
         open_ = self.open
         d.rounded_rectangle(self.PILL, radius=20, fill=(139, 0, 0) if open_ else (255, 236, 236),
                             outline=(240, 150, 150), width=2)
@@ -222,12 +244,19 @@ class FakeAlfaiz:
         for k in range(1, self.counts[self.cat] + 1):
             gx, gy = self.pos(k)
             if abs(x - gx) <= 15 and abs(y - gy) <= 15:
+                import time as _t
+                self._prev_page = (self.cat, self.n)
+                self._load_until = _t.monotonic() + self.load_s
                 self.n, self.scroll_y = k, 0
 
     def scroll(self, x, y, notches):
+        import time as _t
         page = self.pages[(self.cat, self.n)]
         max_y = max(0, page.height - self.CONTENT[3])
-        self.scroll_y = min(max_y, max(0, self.scroll_y - notches * self.px))
+        new = min(max_y, max(0, self.scroll_y - notches * self.px))
+        if self.anim_s and new != self.scroll_y:
+            self._anim = (_t.monotonic(), self.scroll_y, new)
+        self.scroll_y = new
 
     def key(self, name):
         pass
@@ -236,4 +265,24 @@ class FakeAlfaiz:
         return False
 
     def sleep(self, s):
-        pass
+        if self.load_s or self.anim_s:
+            import time as _t
+            _t.sleep(s)
+
+
+
+def make_full_page(q: int, height: int) -> Image.Image:
+    """Teks rata kanan-kiri sampai tepi (seperti pembahasan asli)."""
+    rnd = random.Random(q)
+    page = Image.new("RGB", (AREA[2], height), "white")
+    d = ImageDraw.Draw(page)
+    d.text((4, 8), f"SOAL NOMOR {q}", fill="black")
+    for y in range(30, height - 20, 18):
+        line = f"q{q}y{y} " + "".join(rnd.choice("abcdefghij ") for _ in range(400))
+        n = int((AREA[2] - 10) / (d.textlength("abcdefghij" * 10) / 100))   # penuh sampai tepi kanan
+        while d.textlength(line[:n]) > AREA[2] - 10:
+            n -= 1
+        d.text((0, y), line[:n], fill="black")
+        d.text((AREA[2] - 6, y), "|", fill="black")                    # huruf terakhir di tepi kanan
+    d.text((4, height - 16), f"AKHIR {q}", fill="red")
+    return page

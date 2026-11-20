@@ -53,6 +53,15 @@ pilih Tipe Soal TIU → 1…35 → pilih TKP → 1…45. **F10** = mulai / berhe
    gambar hasil deteksi. Klik **▶ Simpan & Mulai Sekarang**.
 3. Tunggu sampai selesai → **BUAT ZIP**. F10 berikutnya langsung mulai/berhenti/melanjutkan.
 
+**Supaya ±1 detik per soal:** matikan scroll halus di browser — buka `brave://flags/#smooth-scrolling`
+(Chrome: `chrome://flags/#smooth-scrolling`, Edge: `edge://flags/#smooth-scrolling`) → **Disabled** →
+Relaunch. Tanpa itu sekitar 1,5 detik per soal. Zoom browser yang lebih kecil (mis. 80%) juga
+mengurangi jumlah scroll per soal. Aplikasi tidak memakai jeda tetap: foto diambil begitu halaman
+berganti dan diam, jadi tetap akurat walaupun cepat.
+
+Area potong selalu pas di tepi kartu soal. Jika ada tulisan yang menyentuh tepi (tanda terpotong),
+area otomatis diperlebar sampai ruang kosong, soal itu diambil ulang, dan area baru disimpan.
+
 **Atur manual (bila deteksi otomatis gagal):**
 
 1. Di browser: buka halaman **pembahasan** tryout, layar penuh, seluruh Daftar Soal terlihat.
@@ -160,38 +169,38 @@ gambar — bangun, pola, grafik, tabel — ditandai 🖼 di kolom **Gambar**, da
 preview menunjukkan gambar yang ditemukan. Salah deteksi bisa dikoreksi lewat tombol
 **🖼 Gambar ▾** (deteksi ulang / tandai bukan soal bergambar).
 
-Dengan **Sertakan soal bergambar** tercentang (bawaan), ZIP mendapat folder tambahan
-`figural/` khusus untuk soal bergambar; folder TWK/TIU/TKP tidak berubah:
+Dengan **Sertakan soal.json + PROMPT** tercentang (bawaan), ZIP berisi file tambahan; folder
+TWK/TIU/TKP tidak berubah:
 
 ```
 Paket-01.zip
-├── TIU/TIU-012.png            screenshot utuh (seperti biasa)
-└── figural/
-    ├── index.json             daftar semua soal bergambar
-    ├── TIU-012.json           metadata + gambar (base64) — bisa dipakai tanpa file lain
-    └── TIU-012/1.png, 2.png…  tiap gambar sebagai file PNG
+├── TWK/ TIU/ TKP/             screenshot utuh per soal (seperti biasa)
+├── soal.json                  SEMUA soal (TWK + TIU + TKP) dalam satu file
+├── PROMPT.txt                 satu prompt untuk mengubah semua soal sekaligus menjadi JSON
+└── figural/TIU-012/1.png …    potongan gambar soal bergambar
 ```
 
-`figural/TIU-012.json`:
+`soal.json`:
 
 ```json
 {
-  "versi": 1, "paket": "Paket-01", "kategori": "TIU", "nomor": 12, "id": "TIU-012",
-  "file_soal": "TIU/TIU-012.png", "lebar_soal": 760, "tinggi_soal": 1980,
-  "jumlah_gambar": 6,
-  "gambar": [
-    {"id": 1, "bagian": "soal", "file": "figural/TIU-012/1.png",
-     "kotak": {"x": 24, "y": 104, "w": 332, "h": 92}, "lebar": 332, "tinggi": 92,
-     "data": "data:image/png;base64,iVBORw0KGgo..."},
-    {"id": 2, "bagian": "opsi A", "...": "..."}
+  "versi": 2, "paket": "Paket-01",
+  "jumlah": {"TWK": 30, "TIU": 35, "TKP": 45, "total": 110, "bergambar": 4},
+  "soal": [
+    {"urutan": 1, "id": "TWK-001", "kategori": "TWK", "nomor": 1, "file": "TWK/TWK-001.png",
+     "lebar": 790, "tinggi": 1840, "bergambar": false},
+    {"urutan": 42, "id": "TIU-012", "kategori": "TIU", "nomor": 12, "file": "TIU/TIU-012.png",
+     "bergambar": true,
+     "gambar": [{"id": "TIU-012-1", "bagian": "soal", "file": "figural/TIU-012/1.png",
+                 "kotak": {"x": 24, "y": 104, "w": 332, "h": 92},
+                 "data": "data:image/png;base64,iVBORw0KGgo..."}]}
   ]
 }
 ```
 
-`bagian` = `soal`, `opsi A`…`opsi E`, atau `pembahasan`, ditentukan dari posisi gambar
-terhadap bar pilihan jawaban. `kotak` adalah posisi gambar di dalam `file_soal`. Importer
-cukup mencocokkan `kategori` + `nomor`, lalu menempelkan `data` (atau file PNG-nya) ke bagian
-yang sesuai.
+`bagian` = `soal`, `opsi A`…`opsi E`, atau `pembahasan`. Kirim ZIP beserta isi `PROMPT.txt`
+sekali saja ke AI: hasilnya satu JSON berisi semua soal, dengan penanda `[GAMBAR:TIU-012-1]` di
+posisi gambar; data gambarnya diambil dari `soal.json`.
 
 ## Catatan folder
 

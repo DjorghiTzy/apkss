@@ -129,8 +129,9 @@ def test_zip_structure(env, tmp_path):
     assert res.counts == {"TWK": 2, "TIU": 1, "TKP": 1} and res.skipped_unassigned == 1
     with zipfile.ZipFile(res.path) as zf:
         assert zf.testzip() is None
-        assert sorted(zf.namelist()) == ["TIU/TIU-001.png", "TKP/TKP-001.png",
-                                         "TWK/TWK-001.png", "TWK/TWK-002.png"]
+        assert sorted(n for n in zf.namelist() if n.endswith(".png")) == [
+            "TIU/TIU-001.png", "TKP/TKP-001.png", "TWK/TWK-001.png", "TWK/TWK-002.png"]
+        assert {"soal.json", "PROMPT.txt"} <= set(zf.namelist())
         out = tmp_path / "extract"
         zf.extractall(out)
     with Image.open(out / "TWK" / "TWK-002.png") as im:

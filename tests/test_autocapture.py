@@ -70,7 +70,7 @@ def test_full_run_grid(tmp_path, noise):
     assert rep.notches and rep.notches * 53 <= AREA[3]          # tiap langkah pasti tumpang tindih
     res = pkg.export_zip(tmp_path / "Paket-01.zip")
     with zipfile.ZipFile(res.path) as zf:
-        assert len(zf.namelist()) == 6
+        assert len([n for n in zf.namelist() if n.endswith(".png")]) == 6
     assert not list((tmp_path).glob("sm-auto-*"))
 
 
@@ -108,8 +108,17 @@ def test_resume_skips_already_captured(tmp_path):
     heights = {1: 500, 2: 1200, 3: 800}
     pkg = Package(tmp_path / "ws", "P")
     plan = Plan(sections=[["TWK", 3]])
-    b = FakeBrowser(heights, stop_after_grabs=6)
-    rep = AutoCapture(pkg, plan, cfg(), b).run()
+    import threading
+    ev = threading.Event()
+    b = FakeBrowser(heights)
+    orig = b.grab
+
+    def grab_then_stop():
+        if len(pkg.items) >= 1:
+            ev.set()
+        return orig()
+    b.grab = grab_then_stop
+    rep = AutoCapture(pkg, plan, cfg(), b, stop_event=ev).run()
     assert rep.stopped
     first = len(pkg.items)
     rep = AutoCapture(pkg, plan, cfg(), FakeBrowser(heights)).run()     # lanjutkan
@@ -199,7 +208,7 @@ def test_grid_problem_detects_misclicks():
     for p1, p2, p3 in bad:
         nav = NavConfig(mode="grid", grid_first=p1, grid_second=p2, grid_below=p3, columns=5)
         assert nav.grid_problem(45, (1366, 768)), (p1, p2, p3)
-    with pytest.raises(AutoCaptureError, match="Tandai Posisi"):
+    with pytest.raises(AutoCaptureError, match="Atur Otomatis"):
         nav = NavConfig(mode="grid", grid_first=[x, y], grid_second=[x, y + 42], grid_below=[x + 46, y],
                         columns=5, per_category=False)
         AutoCapture(Package("/tmp/ws-gp", "P"), Plan(sections=[["TWK", 5]]), cfg(nav), FakeBrowser({1: 500}))

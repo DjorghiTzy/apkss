@@ -276,8 +276,32 @@ def detect_scroll_area(before: Image.Image, after: Image.Image, x_limit: int) ->
     if len(rows) < 50:
         raise SetupError("Halaman tidak bergeser saat di-scroll — buka soal yang pembahasannya panjang")
     y0, y1 = int(rows[0]), int(rows[-1])
-    x0 = max(0, int(cols[0]) - 24)
-    x1 = x_limit - 2                       # kolom polos sampai sidebar: aman & tidak memotong teks
+    # kolom teks = kolom yang banyak berubah saat scroll (tepi kartu hanya berubah di sudutnya)
+    cnt = diff[y0:y1 + 1].sum(axis=0)
+    text = np.flatnonzero(cnt >= max(3, 0.03 * (y1 - y0 + 1)))
+    c_l, c_r = (int(text[0]), int(text[-1])) if len(text) else (int(cols[0]), int(cols[-1]))
+    region = a[y0:y1 + 1, c_l:c_r + 1].reshape(-1, 3)
+    vals, cntc = np.unique(region[:: max(1, len(region) // 20000)], axis=0, return_counts=True)
+    page_bg = vals[cntc.argmax()]
+
+    def card_edge(start, stop, step):
+        """Garis tepi kartu: kolom yang tidak polos di sebagian besar baris."""
+        for x in range(start, stop, step):
+            col = a[y0:y1 + 1, x]
+            if (np.abs(col - page_bg).max(axis=1) > 6).mean() >= 0.3:
+                return x
+        return None
+    # pas: semua tulisan + ruang 12px, tanpa menyentuh garis/elemen terdekat (tepi kartu, sidebar)
+    right = card_edge(c_r + 1, x_limit, 1)
+    left = card_edge(c_l - 1, -1, -1)
+    x1 = c_r + 12
+    if right is not None:
+        x1 = min(x1, right - 2)
+    x1 = max(c_r + 1, min(x1, x_limit - 2))
+    x0 = c_l - 12
+    if left is not None:
+        x0 = max(x0, left + 2)
+    x0 = max(0, min(x0, c_l - 1))
     # baris tepi yang polos berwarna latar konten (celah putih) ikut dimasukkan, maks. 40px
     region = a[y0:y1 + 1, x0:x1 + 1].reshape(-1, 3)
     vals, cnt = np.unique(region[:: max(1, len(region) // 20000)], axis=0, return_counts=True)
@@ -378,10 +402,7 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
         counts[categories[0]] = grid.count
 
     progress("Mencari area konten (scroll uji)…")
-    xl = int(grid.bbox[0] - grid.dx)              # pasti di kiri tombol grid
-    sl = sidebar_left(base, grid)
-    if grid.bbox[0] - 5 * grid.dx < sl < xl:     # tepi kartu sidebar bila terdeteksi wajar
-        xl = sl
+    xl = int(grid.bbox[0] - grid.box / 2)         # batas: kiri tombol grid
     probe = (max(10, xl // 2), sh // 2)
     top = stable()
     driver.scroll(*probe, -4)

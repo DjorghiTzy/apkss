@@ -91,7 +91,7 @@ def test_question_with_long_explanation(tmp_path):
     pkg.assign(item.id, "TWK", 5)
     res = pkg.export_zip(tmp_path / "Paket-01.zip")
     with zipfile.ZipFile(res.path) as zf:
-        assert zf.namelist() == ["TWK/TWK-005.png"]
+        assert [n for n in zf.namelist() if n.endswith(".png")] == ["TWK/TWK-005.png"]
     pkg.remove(item.id)
     assert not (ws / "Paket-01" / "_bagian" / item.id).exists()
 

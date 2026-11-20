@@ -67,3 +67,39 @@ def test_tkp_grid_slightly_different_still_reaches_every_number(tmp_path):
             got = im.convert("RGB")
             page = b.page_of("TKP", k)
             assert got.crop((off, 0, off + page.width, got.height)).tobytes() == page.tobytes(), k
+
+
+def test_crop_fits_card_exactly_and_never_cuts_text(tmp_path):
+    counts = {"TWK": 6, "TIU": 6, "TKP": 6}
+    b = FakeAlfaiz(counts, full_text=True, card_border=True, sidebar_border=False)
+    res = run_autosetup(b, ["TWK", "TIU", "TKP"], wait_load=0)
+    x, y, w, h = res.crop["rect"]
+    cx, cy, cw, ch = FakeAlfaiz.CONTENT
+    # pas: semua kolom halaman (tulisan sampai tepi) masuk, garis tepi kartu & sidebar tidak
+    assert cx - 9 < x <= cx and cx + cw - 1 <= x + w - 1 < cx + cw + 8, res.crop
+    assert y == cy and h == ch
+
+
+def test_runtime_widens_old_cropped_area(tmp_path):
+    """Pengaturan lama yang memotong sisi kanan (kasus TKP 30) diperbaiki sendiri saat berjalan."""
+    counts = {"TWK": 6, "TIU": 6, "TKP": 6}
+    b = FakeAlfaiz(counts, full_text=True, card_border=True, sidebar_border=False)
+    res = run_autosetup(b, ["TWK", "TIU", "TKP"], wait_load=0)
+    bad = dict(res.crop)
+    x, y, w, h = bad["rect"]
+    bad["rect"] = [x, y, w - 70, h]                                            # terpotong 70px di kanan
+    pkg = Package(tmp_path / "ws", "P")
+    plan = Plan(sections=[[c, n] for c, n in counts.items()])
+    rep = AutoCapture(pkg, plan, RunConfig(crop=bad, nav=res.nav, wait_load=0, stable_interval=0), b).run()
+    assert rep.aborted is None, rep.aborted
+    assert rep.crop is not None and rep.crop["rect"][2] > w - 70, rep.crop         # diperlebar
+    off = FakeAlfaiz.CONTENT[0] - x
+    for cat, n in counts.items():
+        for k in range(1, n + 1):
+            with Image.open(pkg.path_of(pkg.find_slot(cat, k))) as im:
+                got = im.convert("RGB")
+            page = b.page_of(cat, k)
+            wv = min(page.width, got.width - off)                     # bagian halaman yang ikut
+            assert got.crop((off, 0, off + wv, got.height)).tobytes() == page.crop((0, 0, wv, page.height)).tobytes()
+            rest = page.crop((wv, 0, page.width, page.height))       # yang tidak ikut harus kosong
+            assert rest.width == 0 or rest.getextrema() == ((255, 255), (255, 255), (255, 255)), (cat, k, wv)
