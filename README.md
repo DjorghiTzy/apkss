@@ -198,9 +198,21 @@ Paket-01.zip
 }
 ```
 
-`bagian` = `soal`, `opsi A`…`opsi E`, atau `pembahasan`. Kirim ZIP beserta isi `PROMPT.txt`
-sekali saja ke AI: hasilnya satu JSON berisi semua soal, dengan penanda `[GAMBAR:TIU-012-1]` di
-posisi gambar; data gambarnya diambil dari `soal.json`.
+`bagian` = `soal`, `opsi A`…`opsi E`, atau `pembahasan`.
+
+### Dari ZIP ke satu JSON lengkap dengan gambar
+
+1. Kirim ZIP + isi `PROMPT.txt` sekali ke AI → AI menghasilkan `Paket-01.json` berisi SEMUA soal.
+   AI sengaja tidak menyalin gambar (base64 terlalu panjang & rawan rusak); ia menulis penanda
+   `[GAMBAR:TIU-027-2]` di posisi gambar dan daftar id di kolom `gambar`.
+2. Tanam gambar — pilih salah satu:
+   - buka **`gabung-gambar.html`** (ada di ZIP, offline, bisa di HP) → pilih `Paket-01.json` →
+     **Unduh Paket-01-lengkap.json**; atau
+   - di aplikasi: **🖼 Gabungkan Gambar ke JSON…** → pilih `Paket-01.json`.
+3. Hasil `Paket-01-lengkap.json`: setiap soal bergambar punya
+   `"gambar": [{"id": "TIU-027-2", "bagian": "opsi A", "data": "data:image/png;base64,..."}]`,
+   penanda di teks tetap ada untuk menunjukkan posisinya. Gambar yang lupa ditandai AI tetap
+   dimasukkan ke soalnya, dan laporan menyebut penanda yang id-nya salah.
 
 ## Catatan folder
 

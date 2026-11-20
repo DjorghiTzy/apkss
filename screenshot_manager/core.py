@@ -679,6 +679,16 @@ class Package:
                "jumlah_gambar": len(figs), "gambar": figs}
         return doc, files
 
+    def figure_images(self) -> dict:
+        """{id_soal: [{id, bagian, data}]} untuk semua soal bergambar (dipakai penggabung JSON)."""
+        out = {}
+        for it in self.sorted_items():
+            if it.assigned and self.update_figures(it.id):
+                doc, _ = self.figural_payload(it)
+                out[doc["id"]] = [{"id": f"{doc['id']}-{g['id']}", "bagian": g["bagian"], "data": g["data"]}
+                                  for g in doc["gambar"]]
+        return out
+
     def export_zip(self, dest: str | os.PathLike, figural: bool = True) -> ZipResult:
         dest = Path(dest)
         if dest.suffix.lower() != ".zip":
@@ -734,6 +744,10 @@ class Package:
                     zf.writestr("soal.json", json.dumps(manifest, ensure_ascii=False, indent=1))
                     zf.writestr("PROMPT.txt", build_prompt(self.name, jumlah))
                     names += ["soal.json", "PROMPT.txt"]
+                    if docs:                                   # alat offline: tanam gambar ke JSON hasil AI
+                        from .merge import build_merge_html, images_from_manifest
+                        zf.writestr("gabung-gambar.html", build_merge_html(self.name, images_from_manifest(manifest)))
+                        names.append("gabung-gambar.html")
             with zipfile.ZipFile(tmp) as zf:  # verifikasi hasil
                 bad = zf.testzip()
                 if bad is not None:
@@ -779,15 +793,23 @@ ATURAN:
    Opsi berwarna merah adalah jawaban peserta yang salah, BUKAN kunci.
 3. TKP tidak punya satu kunci: isi "skor" tiap opsi (1–5) sesuai pembahasan; "jawaban" = opsi skor 5.
    Untuk TWK/TIU isi "skor" dengan 5 untuk kunci dan 0 untuk lainnya.
-4. Soal bergambar ("bergambar": true di soal.json): tulis penanda [GAMBAR:<id gambar>] di posisi gambar
-   pada "pertanyaan", "opsi", atau "pembahasan" (lihat "bagian": soal / opsi A–E / pembahasan), dan cantumkan
-   id-nya di "gambar". Data gambarnya sudah ada di soal.json — jangan disalin ulang.
+4. Soal bergambar ("bergambar": true di soal.json): tulis penanda [GAMBAR:<id gambar>] PERSIS di posisi
+   gambar itu pada "pertanyaan", "opsi" X, atau "pembahasan" (lihat "bagian": soal / opsi A–E / pembahasan),
+   dan cantumkan SEMUA id gambar soal itu di "gambar" (contoh: "gambar": ["TIU-027-1", "TIU-027-2"]).
+   Setiap id gambar di soal.json harus muncul tepat satu kali. Opsi yang isinya hanya gambar ditulis
+   "[GAMBAR:TIU-027-3]".
+   JANGAN menyalin data base64 — gambar ditanam otomatis pada langkah terakhir (lihat bawah).
 5. Soal tanpa gambar: "gambar": [].
 6. Jika ada bagian yang benar-benar tidak terbaca, tetap isi yang terbaca dan tambahkan "catatan".
 
-KELUARAN: hanya satu JSON valid, tanpa teks lain:
+KELUARAN: hanya satu JSON valid, tanpa teks lain, sebagai file {package}.json:
 {{"paket": "{package}", "jumlah": {jumlah['total']}, "soal": [ ...{jumlah['total']} objek... ]}}
-"""
+""" + ("" if not jumlah.get("bergambar") else f"""
+LANGKAH TERAKHIR (oleh pengguna, bukan AI) — menanam gambar:
+Buka gabung-gambar.html (ada di ZIP ini) di browser, pilih {package}.json hasil AI, lalu unduh
+{package}-lengkap.json. Setiap penanda [GAMBAR:...] mendapat gambar aslinya (base64) di kolom "gambar"
+soal tersebut. Bisa juga lewat aplikasi Screenshot Manager → "Gabungkan Gambar ke JSON…".
+""")
 
 
 def list_packages(workspace_root: str | os.PathLike) -> list[str]:

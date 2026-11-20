@@ -398,3 +398,31 @@ def test_figural_question_in_window_and_zip(win, tmp_path, monkeypatch):
     with zipfile.ZipFile(dest) as zf:
         assert not any(n.startswith("figural/") for n in zf.namelist())
         assert "soal.json" not in zf.namelist()
+
+
+def test_merge_button_creates_complete_json(win, tmp_path, monkeypatch):
+    import json as _json
+
+    from tests.fake_questions import make_question
+
+    w, shots = win, win._shots
+    w.select_category("TIU")
+    w.set_number(27)
+    w.arm()
+    fig, _ = make_question(9, fig_soal=True)
+    fig.save(shots / "fig.png")
+    assert wait_until(lambda: w.pkg.find_slot("TIU", 27) is not None)
+    ai = tmp_path / "Paket-01.json"
+    ai.write_text(_json.dumps({"paket": "Paket-01", "soal": [
+        {"id": "TIU-027", "kategori": "TIU", "nomor": 27, "pertanyaan": "pola [GAMBAR:TIU-027-1]",
+         "gambar": ["TIU-027-1"]}]}))
+    out = tmp_path / "Paket-01-lengkap.json"
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(ai), ""))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[2]))
+    w.merge_json()
+    data = _json.loads(out.read_text())
+    g = data["soal"][0]["gambar"]
+    assert [x["id"] for x in g] == ["TIU-027-1"] and g[0]["data"].startswith("data:image/png;base64,")
+    assert shown and "1 gambar ditanam" in shown[0]

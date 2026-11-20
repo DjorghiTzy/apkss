@@ -852,6 +852,11 @@ class MainWindow(QMainWindow):
                                     "termasuk gambar soal bergambar sebagai base64), PROMPT.txt (satu prompt "
                                     "untuk semua soal), dan folder figural/ berisi potongan gambar.")
         zipbox.addWidget(self.chk_figural)
+        self.btn_merge = QPushButton("🖼 Gabungkan Gambar ke JSON…")
+        self.btn_merge.setToolTip("Pilih JSON hasil AI (berisi penanda [GAMBAR:...]); gambar asli ditanam ke "
+                                  "setiap soal sehingga jadi satu file JSON lengkap.")
+        self.btn_merge.clicked.connect(self.merge_json)
+        zipbox.addWidget(self.btn_merge)
         bottom.addLayout(zipbox)
         outer.addLayout(bottom)
 
@@ -2120,6 +2125,38 @@ class MainWindow(QMainWindow):
             return self.error(f"Tidak bisa menjalankan installer: {exc}")
         self.close()
         QApplication.instance().quit()
+
+    def merge_json(self):
+        """Tanam gambar soal bergambar ke JSON hasil AI -> <nama>-lengkap.json."""
+        from .merge import images_from_manifest, merge, parse_ai_json, report_text
+        src, _ = QFileDialog.getOpenFileName(self, "Pilih JSON hasil AI",
+                                             self.settings["zip_dir"] or str(Path.home() / "Downloads"),
+                                             "JSON (*.json *.txt)")
+        if not src:
+            return
+        try:
+            ai = parse_ai_json(Path(src).read_text(encoding="utf-8-sig"))
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                images = self.pkg.figure_images()
+            finally:
+                QApplication.restoreOverrideCursor()
+            manifest = Path(src).with_name("soal.json")      # soal.json di folder yang sama (bila ada)
+            if manifest.exists():
+                for k, v in images_from_manifest(json.loads(manifest.read_text(encoding="utf-8"))).items():
+                    images.setdefault(k, v)
+            merged, rep = merge(ai, images)
+        except (ValueError, OSError) as exc:
+            return self.error(f"Gagal membaca JSON: {exc}")
+        default = str(Path(src).with_name(Path(src).stem + "-lengkap.json"))
+        dest, _ = QFileDialog.getSaveFileName(self, "Simpan JSON lengkap", default, "JSON (*.json)")
+        if not dest:
+            return
+        Path(dest).write_text(json.dumps(merged, ensure_ascii=False, indent=1), encoding="utf-8")
+        text = report_text(rep)
+        self.set_banner(f"✔ JSON lengkap disimpan: {Path(dest).name} — {rep['gambar']} gambar ditanam", "ok")
+        self.log_event(f"Gabung gambar: {dest} — {text}", "ok")
+        QMessageBox.information(self, "Gabungkan Gambar", f"{dest}\n\n{text}")
 
     def closeEvent(self, e):
         if self.auto_running:
