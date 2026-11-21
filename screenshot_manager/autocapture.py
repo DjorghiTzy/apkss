@@ -132,8 +132,10 @@ class RunConfig:
     max_parts: int = 30
     notches: Optional[int] = None   # None = kalibrasi otomatis
     stable_timeout: float = 6.0     # batas tunggu layar diam
-    stable_interval: float = 0.03   # jeda antar pemeriksaan layar
-    step_ratio: float = 0.8         # langkah scroll ~80% tinggi area (sisanya tumpang tindih)
+    stable_interval: float = 0.015  # jeda antar pemeriksaan layar
+    step_ratio: float = 0.85        # langkah scroll ~85% tinggi area (sisanya tumpang tindih)
+    settle_scroll: float = 0.045    # layar dianggap diam setelah scroll bila tak berubah selama ini
+    settle_load: float = 0.08       # ... setelah pindah soal (memberi waktu gambar soal ikut dimuat)
 
 
 @dataclass
@@ -146,6 +148,9 @@ class Report:
     seconds: float = 0.0
     captured: int = 0                              # soal yang benar-benar diambil di sesi ini
     crop: Optional[dict] = None                    # area potong yang diperbaiki (diperlebar) selama berjalan
+    t_load: float = 0.0                            # total waktu menunggu website memuat soal
+    t_scroll: float = 0.0                          # total waktu scroll + menunggu layar diam
+    t_app: float = 0.0                             # total waktu kerja aplikasi sendiri
 
 
 # ---------------------------------------------------------------- runner
@@ -235,10 +240,11 @@ class AutoCapture:
 
         None = tidak ada perubahan dalam first_timeout."""
         t0 = time.monotonic()
+        quiet = self.cfg.settle_load if need_same >= 3 else self.cfg.settle_scroll
         changed = before is None
         last = None
         last_img = None
-        same = 0
+        since = t0
         while True:
             self._check()
             cur = self._grab_area()
@@ -247,16 +253,15 @@ class AutoCapture:
             if not changed:
                 if b != before:
                     self._last_latency = now - t0
-                    changed, last, last_img, same = True, b, cur, 0
+                    changed, last, last_img, since = True, b, cur, now
                 elif now - t0 > first_timeout:
                     return None
             else:
                 if b == last:
-                    same += 1
-                    if same >= need_same:
+                    if now - since >= quiet:              # tidak berubah selama `quiet` detik = diam
                         return last_img
                 else:
-                    last, last_img, same = b, cur, 0
+                    last, last_img, since = b, cur, now
                 if now - t0 > first_timeout + settle:
                     return last_img
             self._sleep(self.cfg.stable_interval)
@@ -264,21 +269,22 @@ class AutoCapture:
     def _wait_new(self, exclude: set, timeout: float, need_same: int = 3) -> Optional[Image.Image]:
         """Tunggu tampilan yang BUKAN salah satu `exclude` (soal sebelumnya) dan sudah diam."""
         t0 = time.monotonic()
-        last, last_img, same = None, None, 0
+        quiet = self.cfg.settle_load if need_same >= 3 else self.cfg.settle_scroll
+        last, last_img, since = None, None, t0
         while time.monotonic() - t0 < timeout + self.cfg.stable_timeout:
             self._check()
             cur = self._grab_area()
             b = cur.tobytes()
+            now = time.monotonic()
             if b in exclude:
-                last, same = None, 0
-                if time.monotonic() - t0 > timeout:
+                last = None
+                if now - t0 > timeout:
                     return None
             elif b == last:
-                same += 1
-                if same >= need_same:
+                if now - since >= quiet:
                     return last_img
             else:
-                last, last_img, same = b, cur, 0
+                last, last_img, since = b, cur, now
             self._sleep(self.cfg.stable_interval)
         return last_img
 
@@ -621,9 +627,20 @@ class AutoCapture:
         entries = self.plan.entries()
         if not entries:
             raise AutoCaptureError("Rencana soal kosong")
-        figs = ThreadPoolExecutor(max_workers=1)
-        pending = {}
+        from .core import image_fingerprint, make_filename
         from .figures import detect_figures
+        # penyimpanan (sambung + tulis PNG + deteksi gambar) di thread lain: penangkap langsung lanjut
+        saver = ThreadPoolExecutor(max_workers=1)
+        saves = []
+        known = {fp for it in self.pkg.items for fp in [it.fingerprint, *it.part_fps]}
+
+        def save(parts, cat, num, local):
+            res = self.pkg.add_capture(parts, cat, num, source=f"otomatis:{cat} {local}")
+            figs = [] if res.item.figures_off else detect_figures(res.image)
+            res.item.figures, res.item.figures_checked = figs, True
+            self.pkg.save()
+            return res.item, figs
+
         try:
             self.d.move(*self.park)
             self._stable()                                 # jendela aplikasi sudah hilang & layar diam
@@ -636,6 +653,7 @@ class AutoCapture:
                     continue
                 t_q = time.monotonic()
                 first = self._open_question(cat, local, g, not started)
+                t_loaded = time.monotonic()
                 started = True
                 parts = self._capture_question(first, name, rep)
                 for _ in range(2):                         # tulisan menyentuh tepi -> lebarkan & ulangi
@@ -651,33 +669,45 @@ class AutoCapture:
                     self._at_top = False
                     self._scroll_top()
                     parts = self._capture_question(self._stable(), name, rep)
+                t_scrolled = time.monotonic()
                 self._at_top = len(parts) == 1
-                try:
-                    res = self.pkg.add_capture(parts, cat, num, source=f"otomatis:{cat} {local}")
-                except DuplicateImageError as exc:
+                fp = image_fingerprint(parts[0])
+                if fp in known:
+                    dup = self.pkg.find_by_fingerprint(fp)
                     raise AutoCaptureError(
                         f"Soal {cat} nomor {local} ({name}) gagal: tampilannya sama dengan "
-                        f"{exc.existing.display_name} yang sudah tersimpan (navigasi tidak berpindah). "
-                        "Jalankan 🪄 Atur Otomatis lagi.") from exc
-                it = res.item
+                        f"{dup.display_name if dup else 'soal sebelumnya'} (navigasi tidak berpindah). "
+                        "Jalankan 🪄 Atur Otomatis lagi.")
+                known.add(fp)
                 self._prev_first = parts[0].tobytes()
+                saves.append((name, saver.submit(save, parts, cat, num, local)))
                 if len(parts) > 1:
                     self._check_sticky(cat)
-                pending[it.id] = figs.submit(detect_figures, res.image)
-                rep.done.append(it.filename)
+                rep.done.append(make_filename(cat, num))
                 rep.captured += 1
-                self.progress(f"[{idx + 1}/{len(entries)}] ✔ {it.filename} ({len(parts)} bagian, "
-                              f"{time.monotonic() - t_q:.1f} dtk)")
-                self._apply_figures(pending, wait=False)
+                now = time.monotonic()
+                rep.t_load += t_loaded - t_q
+                rep.t_scroll += t_scrolled - t_loaded
+                rep.t_app += now - t_scrolled
+                self.progress(f"[{idx + 1}/{len(entries)}] ✔ {name}.png ({len(parts)} bagian, {now - t_q:.2f} dtk)")
         except StopRequested:
             rep.stopped = True
         except AutoCaptureError as exc:
             rep.aborted = str(exc)
         finally:
-            if pending:
-                self.progress("Memeriksa soal bergambar…")
-            self._apply_figures(pending, wait=True)
-            figs.shutdown(wait=True)
+            t_wait = time.monotonic()
+            for name, fut in saves:                        # tunggu penyimpanan latar belakang selesai
+                try:
+                    item, figs = fut.result()
+                    if figs:
+                        self.progress(f"  🖼 {item.filename}: soal bergambar, {len(figs)} gambar")
+                except DuplicateImageError as exc:
+                    rep.problems.append((name, f"sama dengan {exc.existing.display_name}, tidak disimpan"))
+                    rep.done.remove(f"{name}.png") if f"{name}.png" in rep.done else None
+                except Exception as exc:  # noqa: BLE001
+                    rep.problems.append((name, f"gagal disimpan: {exc}"))
+            saver.shutdown(wait=True)
+            rep.t_app += time.monotonic() - t_wait
             rep.notches = self.notches
             rep.seconds = time.monotonic() - t_start
         return rep

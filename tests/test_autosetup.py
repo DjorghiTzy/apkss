@@ -129,4 +129,4 @@ def test_speed_and_accuracy_with_real_browser_latency(tmp_path):
             wv = min(page.width, got.width - off)
             assert got.crop((off, 0, off + wv, got.height)).tobytes() == page.crop((0, 0, wv, page.height)).tobytes(), (cat, k)
     print(f"Atur Otomatis {setup_s:.1f} dtk, {per_q:.2f} dtk/soal")
-    assert setup_s < 6 and per_q < 2.0, (setup_s, per_q)
+    assert setup_s < 5 and per_q < 1.5, (setup_s, per_q)

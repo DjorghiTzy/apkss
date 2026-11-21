@@ -1743,7 +1743,12 @@ class MainWindow(QMainWindow):
             self.settings["crop"] = dict(rep.crop)
             self._refresh_crop_label()
             self.log_event(f"Area potong diperbaiki & disimpan: {rep.crop['rect']}", "ok")
-        speed = (f" · {rep.seconds / rep.captured:.1f} dtk/soal" if rep.captured else "")
+        speed = (f" · {rep.seconds / rep.captured:.2f} dtk/soal" if rep.captured else "")
+        if rep.captured:
+            n = rep.captured
+            self.log_event(f"Rincian per soal: website memuat {rep.t_load / n:.2f} dtk · scroll "
+                           f"{rep.t_scroll / n:.2f} dtk · aplikasi {rep.t_app / n:.2f} dtk "
+                           f"(total {rep.seconds:.0f} dtk untuk {n} soal)", "ok")
         status = ("dihentikan (ESC / pojok layar)" if rep.stopped else
                   f"BERHENTI: {rep.aborted}" if rep.aborted else "SELESAI")
         kind = "ok" if not rep.aborted and not rep.stopped else "warn"
@@ -1753,6 +1758,10 @@ class MainWindow(QMainWindow):
         for name, msg in rep.problems:
             self.log_event(f"Perlu dicek {name}: {msg}", "warn")
         text = f"Status: {status}\nTersimpan: {len(rep.done)} soal ({rep.captured} diambil sesi ini{speed})"
+        if rep.captured:
+            n = rep.captured
+            text += (f"\nWaktu: {rep.seconds:.0f} dtk total — per soal: website memuat {rep.t_load / n:.2f} · "
+                     f"scroll {rep.t_scroll / n:.2f} · aplikasi {rep.t_app / n:.2f} dtk")
         if rep.done:
             text += f" ({rep.done[0]} … {rep.done[-1]})"
         if rep.problems:
