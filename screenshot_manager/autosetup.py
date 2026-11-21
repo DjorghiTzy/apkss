@@ -331,35 +331,59 @@ class SetupResult:
 
 def run_autosetup(driver, categories: list[str], progress: Callable[[str], None] = lambda m: None,
                   wait_load: float = 1.5, stop_event=None) -> SetupResult:
-    """Deteksi semua pengaturan Tangkap Otomatis dari halaman pembahasan yang sedang terbuka."""
+    """Deteksi semua pengaturan Tangkap Otomatis dari halaman pembahasan yang sedang terbuka.
+
+    Tanpa jeda tetap: setiap langkah menunggu sampai layar BERUBAH lalu DIAM (dipantau tiap 30 ms).
+    """
     notes: list[str] = []
+    POLL = 0.03
 
-    def sleep(s):
-        end = time.monotonic() + s
-        while time.monotonic() < end:
-            if driver.stop_requested() or (stop_event is not None and stop_event.is_set()):
-                raise StopRequested()
-            driver.sleep(min(0.1, end - time.monotonic()) if end > time.monotonic() else 0)
+    def check():
+        if driver.stop_requested() or (stop_event is not None and stop_event.is_set()):
+            raise StopRequested()
 
-    def grab():
+    def grab(bbox=None):
+        if bbox is not None:
+            try:
+                img = driver.grab(bbox=bbox)
+                if img.size == (bbox[2] - bbox[0], bbox[3] - bbox[1]):
+                    return img.convert("RGB")
+                return img.convert("RGB").crop(bbox)
+            except TypeError:
+                return driver.grab().convert("RGB").crop(bbox)
         return driver.grab().convert("RGB")
 
-    def stable():
-        prev = grab()
-        for _ in range(20):
-            sleep(0.3)
-            cur = grab()
-            if cur.tobytes() == prev.tobytes():
-                return cur
-            prev = cur
-        return prev
+    def wait_change(before: Optional[bytes], timeout: float, bbox=None, need_same: int = 2):
+        """Tunggu area berubah dari `before` lalu diam. Kembalikan (gambar, berubah?)."""
+        t0 = time.monotonic()
+        changed = before is None
+        last, last_img, same = None, None, 0
+        while True:
+            check()
+            cur = grab(bbox)
+            b = cur.tobytes()
+            if not changed:
+                if b != before:
+                    changed, last, last_img, same = True, b, cur, 0
+                elif time.monotonic() - t0 > timeout:
+                    return cur, False
+            else:
+                if b == last:
+                    same += 1
+                    if same >= need_same:
+                        return last_img, True
+                else:
+                    last, last_img, same = b, cur, 0
+                if time.monotonic() - t0 > timeout + 5:
+                    return last_img, True
+            driver.sleep(POLL)
 
     first = grab()
     sw, sh = first.size
     park = (sw - 4, sh // 2)
     driver.move(*park)
     progress("Mencari Daftar Soal…")
-    base = stable()
+    base, _ = wait_change(None, 0)
     grid = detect_grid(base)
     if grid is None:
         raise SetupError("Daftar Soal (tombol nomor) tidak ditemukan di layar. Buka halaman pembahasan "
@@ -368,6 +392,8 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
 
     nav = NavConfig(mode="grid", grid_first=list(grid.position(1)), grid_second=list(grid.position(2)),
                     grid_below=list(grid.position(grid.cols + 1)), columns=grid.cols, per_category=True)
+    # area sidebar (dropdown + grid) untuk memantau perubahan dengan cepat
+    side = (max(0, int(grid.bbox[0] - 3 * grid.dx)), 0, min(sw, int(grid.bbox[2] + 3 * grid.dx)), sh)
     counts = {}
     if len(categories) > 1:
         progress("Mencari tombol Tipe Soal…")
@@ -376,22 +402,47 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
             raise SetupError("Tombol dropdown “Tipe Soal” tidak ditemukan di atas Daftar Soal")
         dd_center = (dd[0] + dd[2] // 2, dd[1] + dd[3] // 2)
         nav.category_dropdown = list(dd_center)
+        before_side = grab(side).tobytes()
         driver.click(*dd_center)
         driver.move(*park)
-        sleep(0.8)
-        opened = stable()
+        opened, ok = wait_change(before_side, 1.5)
+        if not ok:
+            raise SetupError("Menu Tipe Soal tidak terbuka setelah tombolnya diklik")
         options = detect_menu(base, opened, dd, len(categories))
         nav.category_options = {c: list(p) for c, p in zip(categories, options)}
         progress("Pilihan Tipe Soal: " + ", ".join(f"{c}@{p}" for c, p in zip(categories, options)))
-        driver.click(*options[0])           # tutup menu dengan memilih kategori pertama
-        sleep(wait_load)
-        for cat, opt in zip(categories, options):
-            driver.click(*dd_center)
-            sleep(0.8)
-            driver.click(*opt)
+        pill = (dd[0], dd[1], dd[0] + dd[2], dd[1] + dd[3])
+        grid_area = (side[0], int(grid.bbox[1] - grid.box), side[2], sh)
+        prev_pill = None
+        prev_grid = None
+        menu_open = True
+        for i, (cat, opt) in enumerate(zip(categories, options)):
+            if not menu_open:
+                before_side = grab(side).tobytes()
+                driver.click(*dd_center)
+                driver.move(*park)
+                wait_change(before_side, 1.0, side)
+            driver.click(*opt)                              # menu tertutup + kategori berganti
             driver.move(*park)
-            sleep(wait_load)
-            g = detect_grid(stable(), hint=grid)
+            menu_open = False
+            pill_img, _ = wait_change(None, 0, pill, need_same=2)
+            cur_pill = pill_img.tobytes()
+            if i == 0:
+                # kategori pertama: sama dengan yang tampil di awal? (label tombol tidak berubah)
+                same_as_start = cur_pill == base.crop(pill).tobytes()
+                ref = base.crop(grid_area).tobytes() if not same_as_start else None
+            else:
+                ref = prev_grid if cur_pill != prev_pill else None
+            if ref is not None:                             # kategori berganti: tunggu grid baru muncul
+                shot, ok = wait_change(ref, max(1.5, wait_load), grid_area, need_same=3)
+                if not ok:                                  # tampilan grid memang sama: tetap lanjut
+                    shot, _ = wait_change(None, 0, grid_area, need_same=2)
+            else:
+                shot, _ = wait_change(None, 0, grid_area, need_same=2)
+            prev_pill, prev_grid = cur_pill, shot.tobytes()
+            full = Image.new("RGB", (sw, sh), "white")
+            full.paste(shot, (grid_area[0], grid_area[1]))
+            g = detect_grid(full, hint=grid)
             if g is None:
                 raise SetupError(f"Daftar Soal tidak terlihat setelah memilih {cat}")
             if abs(g.first[0] - grid.first[0]) > grid.box / 3 or abs(g.first[1] - grid.first[1]) > grid.box / 3:
@@ -404,19 +455,17 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
     progress("Mencari area konten (scroll uji)…")
     xl = int(grid.bbox[0] - grid.box / 2)         # batas: kiri tombol grid
     probe = (max(10, xl // 2), sh // 2)
-    top = stable()
+    top, _ = wait_change(None, 0)
     driver.scroll(*probe, -4)
     driver.move(*park)
-    sleep(0.6)
-    moved = stable()
-    driver.scroll(*probe, 60)
-    sleep(0.6)
+    moved, ok = wait_change(top.tobytes(), 1.0)
+    driver.scroll(*probe, 60)                      # kembali ke atas (tidak perlu ditunggu)
     rect = detect_scroll_area(top, moved, xl)
     crop = {"enabled": True, "rect": list(rect), "screen": [sw, sh]}
     progress(f"Area konten: {rect[2]}×{rect[3]}px di ({rect[0]},{rect[1]})")
 
     # gambar pratinjau hasil deteksi
-    preview = stable().copy()
+    preview = top.copy()
     d = ImageDraw.Draw(preview)
     x, y, w, h = rect
     d.rectangle([x, y, x + w, y + h], outline=(255, 210, 63), width=5)

@@ -204,11 +204,12 @@ class FakeAlfaiz:
         d.text((1150, 145), {"TWK": "Wawasan", "TIU": "Intelegensi", "TKP": "Karakteristik"}[self.cat],
                fill="white" if open_ else (139, 0, 0))
         d.text((1100, 200), "Daftar Soal", fill="black")
+        base_no = sum(self.counts.get(c, 0) for c in self.CATS[:self.CATS.index(self.cat)])
         for k in range(1, self.counts[self.cat] + 1):
             gx, gy = self.pos(k)
             col = (255, 152, 0) if k == self.n else (244, 67, 54)
             d.rectangle([gx - 15, gy - 15, gx + 15, gy + 15], fill=col)
-            d.text((gx - 5, gy - 6), str(k), fill="white")
+            d.text((gx - 7, gy - 6), str(base_no + k), fill="white")          # nomor bersambung (66..110)
         if open_:
             d.rectangle(self.MENU, fill="white", outline=(200, 200, 200))
             for sy in self.SEPS:

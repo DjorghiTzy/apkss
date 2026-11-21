@@ -103,3 +103,30 @@ def test_runtime_widens_old_cropped_area(tmp_path):
             assert got.crop((off, 0, off + wv, got.height)).tobytes() == page.crop((0, 0, wv, page.height)).tobytes()
             rest = page.crop((wv, 0, page.width, page.height))       # yang tidak ikut harus kosong
             assert rest.width == 0 or rest.getextrema() == ((255, 255), (255, 255), (255, 255)), (cat, k, wv)
+
+
+def test_speed_and_accuracy_with_real_browser_latency(tmp_path):
+    """Halaman dimuat 0,3 dtk (soal lama masih tampil selama itu), scroll beranimasi 0,15 dtk."""
+    import time
+    counts = {"TWK": 6, "TIU": 6, "TKP": 6}
+    b = FakeAlfaiz(counts, height_of=lambda c, n: 500 + (n * 211) % 1300, load_s=0.3, anim_s=0.15,
+                   start_cat="TIU")
+    t = time.monotonic()
+    res = run_autosetup(b, ["TWK", "TIU", "TKP"], wait_load=1.5)
+    setup_s = time.monotonic() - t
+    assert res.counts == counts
+    pkg = Package(tmp_path / "ws", "P")
+    rep = AutoCapture(pkg, Plan(sections=[[c, n] for c, n in counts.items()]),
+                      RunConfig(crop=res.crop, nav=res.nav, wait_load=1.5), b).run()
+    assert rep.aborted is None and rep.captured == 18
+    per_q = rep.seconds / rep.captured
+    off = FakeAlfaiz.CONTENT[0] - res.crop["rect"][0]
+    for cat, n in counts.items():
+        for k in range(1, n + 1):
+            with Image.open(pkg.path_of(pkg.find_slot(cat, k))) as im:
+                got = im.convert("RGB")
+            page = b.page_of(cat, k)
+            wv = min(page.width, got.width - off)
+            assert got.crop((off, 0, off + wv, got.height)).tobytes() == page.crop((0, 0, wv, page.height)).tobytes(), (cat, k)
+    print(f"Atur Otomatis {setup_s:.1f} dtk, {per_q:.2f} dtk/soal")
+    assert setup_s < 6 and per_q < 2.0, (setup_s, per_q)

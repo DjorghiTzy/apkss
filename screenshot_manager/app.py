@@ -1523,7 +1523,7 @@ class MainWindow(QMainWindow):
             self.set_banner("Pengaturan area potong dibatalkan.", "warn")
 
     # ============================================================ ambil layar
-    def _hidden_grab(self, done, hide=(), delay_ms: int = 900):
+    def _hidden_grab(self, done, hide=(), delay_ms: int = 250):
         """Sembunyikan jendela, potret layar, tampilkan lagi, lalu panggil done(path)."""
         if self.screen_grabber is None:
             return self.error("Ambil layar otomatis hanya tersedia di Windows. Pakai Win+PrtScn.")
@@ -1556,7 +1556,7 @@ class MainWindow(QMainWindow):
             Path(path).unlink(missing_ok=True)
         self._hidden_grab(done)
 
-    def grab_reference(self, callback, hide=(), delay_ms: int = 900):
+    def grab_reference(self, callback, hide=(), delay_ms: int = 250):
         def done(path):
             try:
                 callback(path)
@@ -1572,7 +1572,7 @@ class MainWindow(QMainWindow):
             return
         self.start_auto_capture(dlg.plan(), dlg.nav, dlg.sp_wait.value())
 
-    def start_auto_capture(self, plan: Plan, nav: NavConfig, wait_load: float, delay_ms: int = 1200):
+    def start_auto_capture(self, plan: Plan, nav: NavConfig, wait_load: float, delay_ms: int = 120):
         cfg = RunConfig(crop=dict(self.settings["crop"] or {}), nav=nav, wait_load=wait_load)
         self.auto_worker = AutoWorker(self)
         self.auto_stop = threading.Event()
@@ -1591,7 +1591,7 @@ class MainWindow(QMainWindow):
         self.auto_worker.progress.connect(self._on_auto_progress)
         self.auto_worker.finished.connect(self._on_auto_finished)
         self.auto_worker.failed.connect(lambda m: self._on_auto_finished(None, m))
-        self.showMinimized()
+        self.hide()                                   # langsung hilang (tanpa animasi minimize)
         QTimer.singleShot(delay_ms, lambda: self.auto_worker.start(runner))
 
     def _setup_categories(self) -> list[str]:
@@ -1600,7 +1600,7 @@ class MainWindow(QMainWindow):
             [c for c in ("TWK", "TIU", "TKP") if c in self.pkg.categories]
         return cats
 
-    def run_auto_setup(self, wait_load: float | None = None, delay_ms: int = 1000):
+    def run_auto_setup(self, wait_load: float | None = None, delay_ms: int = 120):
         if self.driver_factory is None:
             return self.error("Atur Otomatis hanya tersedia di Windows.")
         if self.setup_running or self.auto_running:
@@ -1615,7 +1615,7 @@ class MainWindow(QMainWindow):
                                                       self.setWindowTitle(f"{APP_NAME} — ATUR OTOMATIS {m[:50]}")))
         self.setup_worker.finished.connect(self._on_setup_done)
         self.setup_worker.failed.connect(self._on_setup_failed)
-        self.showMinimized()
+        self.hide()                                   # langsung hilang (tanpa animasi minimize)
         driver = self.driver_factory()
         QTimer.singleShot(delay_ms, lambda: self.setup_worker.start(driver, self._setup_categories(), wait,
                                                                       self.auto_stop))
@@ -1681,7 +1681,7 @@ class MainWindow(QMainWindow):
             self.log_event("F10: area belum diatur — menjalankan Atur Otomatis", "warn")
             return self.run_auto_setup()
         self.log_event("F10: Tangkap Otomatis dimulai", "ok")
-        self.start_auto_capture(plan, nav, float(saved.get("wait_load", 1.5)), delay_ms=800)
+        self.start_auto_capture(plan, nav, float(saved.get("wait_load", 1.5)))
 
     # ---------- hotkey global F10 (Windows)
     HOTKEY_ID = 0xB10

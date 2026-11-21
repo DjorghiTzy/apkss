@@ -184,6 +184,11 @@ class AutoCapture:
         if x + w + 25 >= sw and y + h + 25 >= sh:
             self.park = (max(3, x - 20), y + h // 2) if x > 25 else (sw - 3, sh - 3)
         self._region_ok: Optional[bool] = None
+        self._latency = 0.0          # waktu terlama dari aksi (scroll) sampai layar mulai berubah
+        self._last_latency = 0.0
+        self._just_switched = False
+        self._sticky: Optional[bool] = None   # Daftar Soal tetap terlihat saat halaman di-scroll?
+        self._prev_first: Optional[bytes] = None
         self._bg = None
         self._edge_unfixable = False
 
@@ -241,6 +246,7 @@ class AutoCapture:
             now = time.monotonic()
             if not changed:
                 if b != before:
+                    self._last_latency = now - t0
                     changed, last, last_img, same = True, b, cur, 0
                 elif now - t0 > first_timeout:
                     return None
@@ -255,6 +261,48 @@ class AutoCapture:
                     return last_img
             self._sleep(self.cfg.stable_interval)
 
+    def _wait_new(self, exclude: set, timeout: float, need_same: int = 3) -> Optional[Image.Image]:
+        """Tunggu tampilan yang BUKAN salah satu `exclude` (soal sebelumnya) dan sudah diam."""
+        t0 = time.monotonic()
+        last, last_img, same = None, None, 0
+        while time.monotonic() - t0 < timeout + self.cfg.stable_timeout:
+            self._check()
+            cur = self._grab_area()
+            b = cur.tobytes()
+            if b in exclude:
+                last, same = None, 0
+                if time.monotonic() - t0 > timeout:
+                    return None
+            elif b == last:
+                same += 1
+                if same >= need_same:
+                    return last_img
+            else:
+                last, last_img, same = b, cur, 0
+            self._sleep(self.cfg.stable_interval)
+        return last_img
+
+    def _check_sticky(self, cat: str):
+        """Sekali saja, saat halaman sedang di-scroll ke bawah: apakah grid masih di tempat yang sama?"""
+        if self._sticky is not None or self.cfg.nav.mode != "grid":
+            return
+        key = cat if self.cfg.nav.per_category else "*"
+        known = self._grids.get(key, (None, None))[0]
+        g, off, _ = self._detect_live_grid()
+        if known is None or g is None:
+            self._sticky = False
+        else:
+            self._sticky = abs(g.first[0] - known.first[0]) <= 2 and abs(g.first[1] - known.first[1]) <= 2
+        self.progress("  Daftar Soal menempel saat scroll: klik langsung tanpa menunggu" if self._sticky
+                      else "  Daftar Soal ikut ter-scroll: scroll ke atas sebelum klik")
+
+    def _no_move_timeout(self) -> float:
+        """Batas tunggu 'layar tidak bergerak' — menyesuaikan kecepatan browser yang teramati."""
+        return 0.25 if self._latency == 0 else min(0.3, max(0.08, 2.5 * self._latency))
+
+    def _note_latency(self):
+        self._latency = max(self._latency, self._last_latency)
+
     def _stable(self) -> Image.Image:
         self.d.move(*self.park)
         return self._wait_change(None, 0, self.cfg.stable_timeout)
@@ -266,7 +314,8 @@ class AutoCapture:
         before = self._grab_area().tobytes()
         self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)
         self.d.move(*self.park)
-        self._wait_change(before, 0.25, self.cfg.stable_timeout)
+        if self._wait_change(before, self._no_move_timeout(), self.cfg.stable_timeout) is not None:
+            self._note_latency()
         self._at_top = True
 
     def _select_category(self, cat: str):
@@ -279,15 +328,40 @@ class AutoCapture:
             return
         self.progress(f"  memilih Tipe Soal {cat}")
         self._scroll_top()
+        before = self._grab_area().tobytes()
+        menu = self._menu_region()
         self.d.click(*nav.category_dropdown)
-        self._sleep(0.35)
+        self.d.move(*self.park)
+        self._wait_region_change(menu, 1.0)                 # menu terbuka (tanpa jeda tetap)
         self.d.click(*opt)
         self.d.move(*self.park)
-        self._sleep(0.2)
-        self._wait_change(None, 0, max(1.0, self.cfg.wait_load))
-        self._at_top = False
-        self._scroll_top()
+        # soal nomor 1 kategori baru tampil = area soal berubah lalu diam
+        self._wait_change(before, max(1.0, self.cfg.wait_load), self.cfg.stable_timeout, need_same=3)
+        self._at_top = True
+        self._just_switched = True
         self._shown_cat = cat
+
+    def _menu_region(self):
+        nav = self.cfg.nav
+        x, y = nav.category_dropdown
+        sw, sh = self.cfg.crop["screen"]
+        return (max(0, x - 150), y, min(sw, x + 150), min(sh, y + 250))
+
+    def _wait_region_change(self, box, timeout: float):
+        def g():
+            try:
+                img = self.d.grab(bbox=box)
+                return img if img.size == (box[2] - box[0], box[3] - box[1]) else img.crop(box)
+            except TypeError:
+                return self.d.grab().crop(box)
+        before = g().tobytes()
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            self._check()
+            if g().tobytes() != before:
+                return True
+            self._sleep(self.cfg.stable_interval)
+        return False
 
     def _grid_region(self):
         nav = self.cfg.nav
@@ -355,9 +429,31 @@ class AutoCapture:
         nav = self.cfg.nav
         if nav.mode == "grid" and nav.per_category and cat != self._shown_cat:
             self._select_category(cat)
+        if (nav.mode == "grid" and self._sticky and not self._at_top and self._prev_first is not None
+                and not self._just_switched):
+            # grid tetap terlihat: klik sekarang, scroll ke atas BERSAMAAN dengan halaman memuat
+            target = n if nav.per_category else g_index
+            exclude = {self._prev_first, self._grab_area().tobytes()}
+            self.d.click(*self._number_pos(cat, target))
+            self.d.scroll(*self.center, SCROLL_TOP_NOTCHES)
+            self.d.move(*self.park)
+            img = self._wait_new(exclude, max(0.8, self.cfg.wait_load))
+            if img is not None:
+                self._at_top = True
+                return img
+            self._at_top = False                           # tidak berganti: pakai jalur biasa
         self._scroll_top()
         before = self._grab_area().tobytes()
         target = n if (nav.mode != "grid" or nav.per_category) else g_index
+        if nav.mode == "grid" and (first or self._just_switched):
+            # soal yang dituju mungkin sudah tampil (mis. nomor 1 setelah ganti kategori): jangan klik & tunggu
+            self._just_switched = False
+            g, off, gimg = self._detect_live_grid()
+            if g is not None:
+                self._grids[cat if nav.per_category else "*"] = (g, off)
+                if self._current_index(gimg, g) == target:
+                    return self._stable()
+        self._just_switched = False
         for attempt in range(3):
             if nav.mode == "grid":
                 self.d.click(*self._number_pos(cat, target, refresh=attempt > 0))
@@ -410,9 +506,10 @@ class AutoCapture:
             last = parts[-1]
             self.d.scroll(*self.center, -notches)
             self.d.move(*self.park)
-            cur = self._wait_change(last.tobytes(), 0.3, self.cfg.stable_timeout)
+            cur = self._wait_change(last.tobytes(), self._no_move_timeout(), self.cfg.stable_timeout)
             if cur is None:
                 return parts, gap, True                    # tidak bergeser lagi: sudah paling bawah
+            self._note_latency()
             self._at_top = False
             k = find_overlap(last, cur)
             if k == 0:
@@ -528,6 +625,8 @@ class AutoCapture:
         pending = {}
         from .figures import detect_figures
         try:
+            self.d.move(*self.park)
+            self._stable()                                 # jendela aplikasi sudah hilang & layar diam
             started = False
             for idx, (g, cat, num, local) in enumerate(entries):
                 self._check()
@@ -561,6 +660,9 @@ class AutoCapture:
                         f"{exc.existing.display_name} yang sudah tersimpan (navigasi tidak berpindah). "
                         "Jalankan 🪄 Atur Otomatis lagi.") from exc
                 it = res.item
+                self._prev_first = parts[0].tobytes()
+                if len(parts) > 1:
+                    self._check_sticky(cat)
                 pending[it.id] = figs.submit(detect_figures, res.image)
                 rep.done.append(it.filename)
                 rep.captured += 1

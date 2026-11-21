@@ -53,7 +53,13 @@ pilih Tipe Soal TIU → 1…35 → pilih TKP → 1…45. **F10** = mulai / berhe
    gambar hasil deteksi. Klik **▶ Simpan & Mulai Sekarang**.
 3. Tunggu sampai selesai → **BUAT ZIP**. F10 berikutnya langsung mulai/berhenti/melanjutkan.
 
-**Supaya ±1 detik per soal:** matikan scroll halus di browser — buka `brave://flags/#smooth-scrolling`
+**Kecepatan (diukur dengan latensi seperti browser asli):** Atur Otomatis ±2 detik; Tangkap
+Otomatis ±1 detik per soal — tanpa jeda tetap: setiap langkah menunggu layar berubah lalu diam
+(dipantau tiap 30 ms). Bila Daftar Soal tetap terlihat saat halaman di-scroll, nomor berikutnya
+langsung diklik dan scroll ke atas berjalan bersamaan dengan halaman memuat; tampilan soal
+sebelumnya tidak pernah ikut tertangkap.
+
+**Lebih cepat lagi:** matikan scroll halus di browser — buka `brave://flags/#smooth-scrolling`
 (Chrome: `chrome://flags/#smooth-scrolling`, Edge: `edge://flags/#smooth-scrolling`) → **Disabled** →
 Relaunch. Tanpa itu sekitar 1,5 detik per soal. Zoom browser yang lebih kecil (mis. 80%) juga
 mengurangi jumlah scroll per soal. Aplikasi tidak memakai jeda tetap: foto diambil begitu halaman
