@@ -130,3 +130,21 @@ def test_speed_and_accuracy_with_real_browser_latency(tmp_path):
             assert got.crop((off, 0, off + wv, got.height)).tobytes() == page.crop((0, 0, wv, page.height)).tobytes(), (cat, k)
     print(f"Atur Otomatis {setup_s:.1f} dtk, {per_q:.2f} dtk/soal")
     assert setup_s < 5 and per_q < 1.5, (setup_s, per_q)
+
+
+def test_every_question_under_one_second_without_smooth_scroll(tmp_path):
+    import re
+    counts = {"TWK": 8, "TIU": 8, "TKP": 8}
+    b = FakeAlfaiz(counts, height_of=lambda c, n: 500 + (n * 211) % 1500, load_s=0.3, anim_s=0.0,
+                   start_cat="TIU")
+    res = run_autosetup(b, ["TWK", "TIU", "TKP"], wait_load=1.5)
+    assert res.crop["smooth_scroll"] is False
+    logs = []
+    pkg = Package(tmp_path / "ws", "P")
+    rep = AutoCapture(pkg, Plan(sections=[[c, n] for c, n in counts.items()]),
+                      RunConfig(crop=res.crop, nav=res.nav, wait_load=1.5), b, logs.append).run()
+    assert rep.aborted is None and rep.captured == 24
+    times = [float(re.search(r"([\d.]+) dtk\)", l).group(1)) for l in logs if " dtk)" in l]
+    assert len(times) == 24
+    print("terlama", max(times), "rata-rata", sum(times) / len(times))
+    assert max(times) < 1.0, sorted(times)[-5:]

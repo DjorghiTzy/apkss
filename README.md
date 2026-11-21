@@ -53,12 +53,12 @@ pilih Tipe Soal TIU → 1…35 → pilih TKP → 1…45. **F10** = mulai / berhe
    gambar hasil deteksi. Klik **▶ Simpan & Mulai Sekarang**.
 3. Tunggu sampai selesai → **BUAT ZIP**. F10 berikutnya langsung mulai/berhenti/melanjutkan.
 
-**Kecepatan (diukur dengan website yang memuat soal 0,3 dtk):** Atur Otomatis ±2 detik; Tangkap
-Otomatis ±0,9 detik per soal (110 soal ≈ 1 menit 40 detik), atau ±0,65 detik per soal (≈ 1 menit
-12 detik) bila scroll halus browser dimatikan. Tanpa jeda tetap: layar dipantau tiap 15 ms dan foto
-diambil begitu halaman berganti lalu diam; penyambungan, penyimpanan PNG, dan deteksi gambar
-berjalan di latar belakang sementara soal berikutnya sudah dibuka. Laporan akhir menunjukkan
-rincian waktu per soal: menunggu website, scroll, dan kerja aplikasi.
+**Kecepatan (simulasi, website memuat soal 0,3 dtk):** Atur Otomatis ±2,5 detik. Dengan scroll
+halus browser dimatikan: setiap soal < 1 detik (rata-rata ±0,5 detik, terlama ±0,6 detik; 110 soal
+≈ 1 menit). Dengan scroll halus menyala, soal panjang ±1,05 detik karena animasi scroll browser —
+Atur Otomatis mendeteksi hal ini dan menunjukkan cara mematikannya. Tanpa jeda tetap: layar dipantau
+tiap 15 ms; scroll difoto begitu pergeserannya tepat satu langkah; ganti Tipe Soal tidak menunggu;
+penyimpanan & deteksi gambar berjalan di latar belakang. Laporan akhir merinci waktu per soal.
 
 **Lebih cepat lagi:** matikan scroll halus di browser — buka `brave://flags/#smooth-scrolling`
 (Chrome: `chrome://flags/#smooth-scrolling`, Edge: `edge://flags/#smooth-scrolling`) → **Disabled** →

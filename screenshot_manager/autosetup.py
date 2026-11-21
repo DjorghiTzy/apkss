@@ -353,11 +353,14 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
                 return driver.grab().convert("RGB").crop(bbox)
         return driver.grab().convert("RGB")
 
+    frames = [0]                                     # jumlah frame berbeda yang terlihat (deteksi animasi)
+
     def wait_change(before: Optional[bytes], timeout: float, bbox=None, need_same: int = 2):
         """Tunggu area berubah dari `before` lalu diam. Kembalikan (gambar, berubah?)."""
         t0 = time.monotonic()
         changed = before is None
         last, last_img, same = None, None, 0
+        frames[0] = 0
         while True:
             check()
             cur = grab(bbox)
@@ -365,6 +368,7 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
             if not changed:
                 if b != before:
                     changed, last, last_img, same = True, b, cur, 0
+                    frames[0] = 1
                 elif time.monotonic() - t0 > timeout:
                     return cur, False
             else:
@@ -374,6 +378,7 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
                         return last_img, True
                 else:
                     last, last_img, same = b, cur, 0
+                    frames[0] += 1
                 if time.monotonic() - t0 > timeout + 5:
                     return last_img, True
             driver.sleep(POLL)
@@ -459,9 +464,28 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
     driver.scroll(*probe, -4)
     driver.move(*park)
     moved, ok = wait_change(top.tobytes(), 1.0)
+    smooth = frames[0] >= 3                        # banyak frame antara = animasi scroll halus browser
+    driver.scroll(*probe, -4)                      # langkah kedua: untuk memastikan kalibrasi tidak mentok
+    moved2, _ = wait_change(moved.tobytes(), 0.5)
     driver.scroll(*probe, 60)                      # kembali ke atas (tidak perlu ditunggu)
     rect = detect_scroll_area(top, moved, xl)
     crop = {"enabled": True, "rect": list(rect), "screen": [sw, sh]}
+    # kalibrasi scroll (px per notch) & apakah Daftar Soal tetap di tempat saat di-scroll
+    from .core import find_overlap
+    box = (rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3])
+    k1 = find_overlap(top.crop(box), moved.crop(box))
+    k2 = find_overlap(moved.crop(box), moved2.crop(box))
+    if k1 and k2 and k1 == k2:                     # dua langkah sama panjang = belum mentok di dasar
+        crop["px_per_notch"] = round((rect[3] - k1) / 4, 3)
+    gbox = (int(grid.bbox[0]), int(grid.bbox[1]), int(grid.bbox[2]), int(grid.bbox[3]))
+    crop["sticky"] = top.crop(gbox).tobytes() == moved.crop(gbox).tobytes()
+    crop["smooth_scroll"] = bool(smooth)
+    if smooth:
+        notes.append("Scroll halus browser AKTIF — tiap scroll menunggu animasi browser. Matikan di "
+                     "brave://flags/#smooth-scrolling (Chrome: chrome://flags/#smooth-scrolling) → Disabled → "
+                     "Relaunch agar setiap soal < 1 detik")
+    progress(f"Scroll: {crop.get('px_per_notch', '?')} px/notch · Daftar Soal "
+             + ("menempel" if crop["sticky"] else "ikut ter-scroll"))
     progress(f"Area konten: {rect[2]}×{rect[3]}px di ({rect[0]},{rect[1]})")
 
     # gambar pratinjau hasil deteksi

@@ -633,6 +633,16 @@ class SetupResultDialog(QDialog):
                                 Qt.KeepAspectRatio, Qt.SmoothTransformation))
         lay.addWidget(pic, 0, Qt.AlignCenter)
         row = QHBoxLayout()
+        if res.crop.get("smooth_scroll"):
+            warn = QLabel("⚠ <b>Scroll halus browser AKTIF</b> — ini satu-satunya yang membuat soal panjang > 1 detik. "
+                          "Buka <code>brave://flags/#smooth-scrolling</code> (Chrome: <code>chrome://flags/#smooth-scrolling"
+                          "</code>) → <b>Disabled</b> → <b>Relaunch</b>, lalu jalankan Atur Otomatis lagi.")
+            warn.setWordWrap(True)
+            warn.setStyleSheet("background:#fff1c9; padding:8px; border-radius:6px")
+            lay.insertWidget(1, warn)
+            b_copy = QPushButton("Salin alamat brave://flags/#smooth-scrolling")
+            b_copy.clicked.connect(lambda: QApplication.clipboard().setText("brave://flags/#smooth-scrolling"))
+            lay.insertWidget(2, b_copy)
         b_start = QPushButton("▶ Simpan && Mulai Sekarang")
         b_start.setStyleSheet("font-weight:bold; background:#1f6feb; color:white; padding:8px 16px")
         b_save = QPushButton("Simpan Saja")
