@@ -694,7 +694,7 @@ class AutoCapture:
         for attempt in range(3):
             blank = any(is_blank(p) for p in parts)
             rows = option_rows(stitch(parts)[0]) if not blank else 0
-            if not blank and (rows >= 5 or rows == 0):    # 0 = bukan halaman berpilihan: tak dinilai
+            if not blank and (rows >= 4 or rows == 0):    # 4 pilihan wajar; 0 = tak dinilai
                 return parts
             if attempt == 2:
                 break
@@ -725,7 +725,7 @@ class AutoCapture:
             rep.problems.append((name, "screenshot kosong/hitam — periksa & ambil ulang"))
         else:
             rows = option_rows(stitch(parts)[0])
-            if 0 < rows < 5:
+            if 0 < rows < 4:
                 rep.problems.append((name, f"hanya {rows} baris pilihan terlihat (A–E tidak lengkap?) — periksa"))
         return parts
 

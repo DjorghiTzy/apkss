@@ -655,8 +655,8 @@ class Package:
                     rows = option_rows(im)
             except Exception:  # noqa: BLE001
                 rows = 5
-            if 0 < rows < 5:
-                issues.append(f"{it.filename}: hanya {rows} pilihan jawaban terlihat (A–E tidak lengkap?)")
+            if 0 < rows < 4:                       # 4 pilihan = wajar; 1–3 = pasti terpotong
+                issues.append(f"{it.filename}: hanya {rows} pilihan jawaban terlihat (terpotong?)")
         for cat in self.categories:
             nums = sorted(i.number for i in assigned if i.category == cat)
             want = expected.get(cat, max(nums, default=0))

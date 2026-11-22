@@ -26,31 +26,38 @@ def _longest_runs(mask: np.ndarray) -> np.ndarray:
 
 
 def option_rows(img: Image.Image) -> int:
-    """Jumlah baris pilihan jawaban: pita ±40 px, ≥ 30% lebar, abu muda / hijau / merah."""
+    """Jumlah baris pilihan jawaban (bar abu muda / hijau / merah).
+
+    Teks di dalam bar memotong warna bar, jadi baris bar dikenali dari PORSI warnanya (≥ 5% lebar;
+    baris berteks panjang pun masih di atasnya), dan bar-bar dipisahkan oleh celah putih bersih. Bar sah bila
+    tingginya 18–400 px, ada baris yang ≥ 40% (tepi bar yang polos), dan tidak menyentuh kedua tepi
+    gambar (bukan header/menu situs).
+    """
     a = np.asarray(img.convert("RGB"), dtype=np.int16)
     h, w = a.shape[:2]
+    if h < 20 or w < 20:
+        return 0
     r, g, b = a[..., 0], a[..., 1], a[..., 2]
     mx, mn = a.max(axis=2), a.min(axis=2)
-    masks = {
-        "abu": (mn >= 225) & (mx <= 250) & (mx - mn <= 8),
-        "hijau": (g > r + 40) & (g > b + 40) & (g > 90),
-        "merah": (r > g + 60) & (r > b + 60) & (r > 90),
-    }
-    bands = 0
-    for m in masks.values():
-        runs = _longest_runs(m)
-        # baris jawaban punya jarak di kiri & kanan; pita yang menyentuh tepi = header/menu situs
-        on = (runs >= 0.30 * w) & (runs < 0.98 * w) & ~(m[:, 0] | m[:, -1])
-        start = None
-        for y in range(h + 1):
-            v = y < h and on[y]
-            if v and start is None:
-                start = y
-            elif not v and start is not None:
-                if 20 <= y - start <= 90:
-                    bands += 1
-                start = None
-    return bands
+    # abu bar = #F1F1F1 (bayangan kartu 247+ bukan bar), hijau = kunci, merah = jawaban salah
+    bar = ((mn >= 230) & (mx <= 246) & (mx - mn <= 6)) | \
+          ((g > r + 40) & (g > b + 40) & (g > 90)) | \
+          ((r > g + 60) & (r > b + 60) & (r > 90))
+    edge = bar[:, :6].all(axis=1) & bar[:, -6:].all(axis=1)  # pita padat dari tepi ke tepi = header
+    bar[edge] = False                                         # (bayangan kartu 1–3 px tidak terhitung)
+    frac = bar.sum(axis=1) / w
+    on = frac >= 0.05                  # baris bar (baris berteks panjang di dalam bar pun masih ≥ 5%);
+    #                                    celah antar bar = putih bersih (±0%)
+    count, start = 0, None
+    for y in range(h + 1):
+        v = y < h and on[y]
+        if v and start is None:
+            start = y
+        elif not v and start is not None:
+            if 18 <= y - start <= 400 and frac[start:y].max() >= 0.40:
+                count += 1
+            start = None
+    return count
 
 
 def trim_for_export(img: Image.Image, margin: int = 10) -> Image.Image:

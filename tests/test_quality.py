@@ -53,3 +53,29 @@ def test_trim_keeps_plain_content_and_export_uses_it(tmp_path):
         assert got.width < img.width - 450 and got.height < img.height
     with Image.open(pkg.path_of(pkg.find_slot("TWK", 1))) as orig:      # file workspace tetap utuh
         assert orig.size == img.size
+
+
+def test_option_rows_real_like_long_text_and_shadows():
+    """Kasus nyata: semua TWK lengkap tapi tertulis "hanya 1–3 pilihan" (teks panjang & bayangan kartu)."""
+    from tests.fake_questions import make_real_like_question
+    for s in range(1, 9):
+        assert option_rows(make_real_like_question(s)) == 5, s
+        assert option_rows(make_real_like_question(s, shadow=False)) == 5, s
+        assert option_rows(make_real_like_question(s, n_options=4)) == 4, s
+
+
+def test_export_check_no_false_alarm_and_four_options_ok(tmp_path):
+    from screenshot_manager.core import Package
+    from tests.fake_questions import make_real_like_question
+    pkg = Package(tmp_path / "ws", "P")
+    for n in range(1, 4):
+        make_real_like_question(n).save(tmp_path / f"{n}.png")
+        pkg.add_image(tmp_path / f"{n}.png", "TWK", n)
+    make_real_like_question(9, n_options=4).save(tmp_path / "4.png")
+    pkg.add_image(tmp_path / "4.png", "TWK", 4)
+    cut = make_real_like_question(7)
+    cut.crop((0, 0, cut.width, 230)).save(tmp_path / "cut.png")             # terpotong di pilihan B/C
+    pkg.add_image(tmp_path / "cut.png", "TWK", 5)
+    issues = pkg.export_check({"TWK": 5})
+    assert issues == ["TWK-005.png: hanya 2 pilihan jawaban terlihat (terpotong?)"] or \
+        (len(issues) == 1 and issues[0].startswith("TWK-005.png: hanya")), issues

@@ -191,3 +191,34 @@ def make_capture_like_user(seed=1, left_pad=500, bottom_space=180):
     d.rounded_rectangle([left_pad - 6, 62, left_pad + q.width + 6, 70 + q.height + 60], radius=14,
                         outline=(232, 232, 232))
     return img, (left_pad, 30)
+
+
+def make_real_like_question(seed=1, n_options=5, shadow=True):
+    """Meniru tangkapan asli: bar #F1F1F1 dengan teks pilihan PANJANG (hampir selebar bar, menutupi
+    sebagian besar warna bar), bar hijau #00B200, dan bayangan kartu terang (246–250) di tepi gambar."""
+    rnd = random.Random(seed)
+    W = 807
+    img = Image.new("RGB", (W, 900), (253, 253, 253))
+    d = ImageDraw.Draw(img)
+    if shadow:
+        for i, c in enumerate((246, 248, 250)):
+            d.line([i, 0, i, 900], fill=(c, c, c))
+            d.line([W - 1 - i, 0, W - 1 - i, 900], fill=(c, c, c))
+    d.text((30, 20), f"Soal Nomor {seed} (PG)", fill="black")
+    y = text_lines(d, 30, 50, 2, rnd)
+    y += 20
+    colors = [(241, 241, 241), (139, 0, 0), (241, 241, 241), (241, 241, 241), (0, 178, 0)][:n_options]
+    if n_options == 4:
+        colors = [(241, 241, 241), (241, 241, 241), (0, 178, 0), (241, 241, 241)]
+    for i, col in enumerate(colors):
+        d.rounded_rectangle([30, y, W - 30, y + 46], radius=10, fill=col)
+        tc = "black" if col == (241, 241, 241) else "white"
+        d.text((44, y + 16), "ABCDE"[i], fill=tc)
+        x = 70
+        while x < W - 60:                                        # teks padat sepanjang bar
+            d.rectangle([x, y + 15, x + 6, y + 28], fill=tc)
+            x += 8 if rnd.random() < 0.85 else 12
+        y += 56
+    y = text_lines(d, 30, y + 40, 8, rnd)
+    d.text((30, y + 10), "Jawaban: E", fill="black")
+    return img.crop((0, 0, W, y + 60))
