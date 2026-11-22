@@ -171,37 +171,29 @@ Hanya gambar yang punya kategori & nomor yang dimasukkan. ZIP ditulis ke file se
 
 ## Ekspor untuk SKD Intelligence
 
-### 1. BUAT ZIP (untuk ChatGPT)
+Alur: **BUAT ZIP** → kirim ZIP + isi `PROMPT.txt` ke ChatGPT → ChatGPT mengembalikan ZIP yang
+sama ditambah `soal.json` → impor ZIP itu di **SKD Intelligence → Impor Soal → Unggah ZIP**.
+SKD Intelligence memotong sendiri gambar soal figural dari screenshot, jadi Screenshot Manager
+tidak memotong gambar.
 
 ```
 Paket-01.zip
-├─ PROMPT.txt        prompt untuk ChatGPT, terisi otomatis (jumlah soal, daftar soal bergambar, paket)
-├─ daftar.json       {"paket", "bergambar": ["TIU-027", …], "screenshot": [{id, kategori, nomor, file}]}
-├─ TWK/TWK-001.png … TIU/TIU-001.png … TKP/TKP-045.png   (nomor PER KATEGORI, 3 digit)
-└─ gambar/TIU-027.png …                                  (HANYA soal yang benar-benar bergambar)
+├─ PROMPT.txt     prompt untuk ChatGPT ({{PAKET}} dan {{JUMLAH}} terisi otomatis)
+├─ daftar.json    {"paket": "Paket 01", "jumlah": 110, "screenshot": [{kategori, nomor, file}]}
+├─ TWK/TWK-001.png … TWK-030.png
+├─ TIU/TIU-001.png … TIU-035.png
+└─ TKP/TKP-001.png … TKP-045.png      (nomor PER KATEGORI, 3 digit)
 ```
 
-Tanpa base64 di file mana pun. `soal.json` sengaja tidak ada — nama itu untuk hasil ChatGPT.
+Sebelum ekspor, aplikasi memperingatkan screenshot kosong/hitam, nomor yang hilang (dibanding
+TWK 30 / TIU 35 / TKP 45 atau jumlah di Tangkap Otomatis), dan nomor yang isinya ganda.
 
-**Potong gambar soal (otomatis, tanpa OCR):**
-1. cari baris jawaban pertama (pita ±40 px, ≥ 30% lebar, abu muda / hijau / merah);
-2. cari awal gambar: garis lurus gelap ≥ 45 px di bawah 8% teratas (logo, tombol, teks tidak memenuhi);
-3. potong dari awal gambar sampai 10 px di atas baris jawaban, pangkas ke tinta gelap + 12 px;
-4. disimpan hanya bila ≥ 300×100 px dan tanpa piksel hijau/merah (kunci tidak bocor).
-
-Gambar di dalam pilihan jawaban ditandai **✂ manual**. Sebelum ekspor muncul **pratinjau semua
-potongan** dengan tombol **Buang** dan **Potong Ulang** (kotak bisa digeser / digambar ulang).
-Kolom *Gambar*: 🖼 = masuk `gambar/`, ✂ manual = perlu dipotong, — = bukan soal bergambar.
-
-### 2. Kirim ke ChatGPT
-Unggah `Paket-01.zip` dan tempel isi `PROMPT.txt`. Hasilnya `soal.json` (semua TWK, TIU, TKP).
-
-### 3. 📦 Buat ZIP siap impor
-Tempel / pilih `soal.json` → aplikasi memeriksa (paket, kategori, nomor 1–30/35/45 tanpa ganda,
-subtopik, pilihan A–E, kunci TWK/TIU, skor 1–5 TKP, rujukan gambar, jumlah soal) dan menampilkan
+**📦 Buat ZIP siap impor** — bila ChatGPT hanya memberi `soal.json` (bukan ZIP): tempel / pilih
+`soal.json`, aplikasi memeriksanya (paket, kategori, nomor 1–30/35/45 tanpa ganda, subtopik,
+pilihan A–E, kunci TWK/TIU, skor 1–5 TKP, `bergambar` hanya TIU, jumlah soal) dan menampilkan
 masalah per nomor (tetap boleh lanjut), membersihkan `[gambar]`/`[GAMBAR:…]`, mengganti
-`opsi`→`pilihan` dan `jawaban`→`kunci`, lalu membuat **Paket-01-siap-impor.zip** berisi HANYA
-`soal.json` + `gambar/`. Unggah di **SKD Intelligence → Impor Soal → Unggah ZIP**.
+`opsi`→`pilihan` dan `jawaban`→`kunci`, lalu membuat `Paket-01-siap-impor.zip` = isi ZIP ekspor +
+`soal.json` di akar ZIP.
 
 ## Catatan folder
 

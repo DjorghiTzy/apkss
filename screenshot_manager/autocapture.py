@@ -676,7 +676,6 @@ class AutoCapture:
         if not entries:
             raise AutoCaptureError("Rencana soal kosong")
         from .core import image_fingerprint, make_filename
-        from .figures import detect_question_figure
         # penyimpanan (sambung + tulis PNG + deteksi gambar) di thread lain: penangkap langsung lanjut
         saver = ThreadPoolExecutor(max_workers=1)
         saves = []
@@ -684,9 +683,7 @@ class AutoCapture:
 
         def save(parts, cat, num, local):
             res = self.pkg.add_capture(parts, cat, num, source=f"otomatis:{cat} {local}")
-            self.pkg.apply_figure_result(res.item, detect_question_figure(res.image))
-            self.pkg.save()
-            return res.item, res.item.figures
+            return res.item
 
         try:
             self.d.move(*self.park)
@@ -745,9 +742,7 @@ class AutoCapture:
             t_wait = time.monotonic()
             for name, fut in saves:                        # tunggu penyimpanan latar belakang selesai
                 try:
-                    item, figs = fut.result()
-                    if figs:
-                        self.progress(f"  🖼 {item.filename}: soal bergambar, {len(figs)} gambar")
+                    fut.result()
                 except DuplicateImageError as exc:
                     rep.problems.append((name, f"sama dengan {exc.existing.display_name}, tidak disimpan"))
                     rep.done.remove(f"{name}.png") if f"{name}.png" in rep.done else None

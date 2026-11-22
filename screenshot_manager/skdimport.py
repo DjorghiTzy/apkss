@@ -1,13 +1,9 @@
-"""'Buat ZIP siap impor': soal.json dari ChatGPT + gambar/ -> <paket>-siap-impor.zip untuk SKD Intelligence."""
+"""'Buat ZIP siap impor': isi ZIP ekspor + soal.json dari ChatGPT -> <paket>-siap-impor.zip untuk SKD Intelligence."""
 from __future__ import annotations
 
 import json
-import os
 import re
-import tempfile
-import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 SUBTOPIK = {
@@ -107,8 +103,8 @@ class Validation:
         self.issues.append((who, msg))
 
 
-def validate(doc: dict, available: set[str], expected: int, figural: set[str]) -> Validation:
-    """available: path gambar yang ada (mis. "gambar/TIU-027.png"); figural: id soal bergambar ("TIU-027")."""
+def validate(doc: dict, expected: int) -> Validation:
+    """expected: jumlah screenshot di paket."""
     v = Validation(total=len(doc.get("soal", [])))
     if not str(doc.get("paket") or "").strip():
         v.add("umum", "\"paket\" kosong")
@@ -145,39 +141,11 @@ def validate(doc: dict, available: set[str], expected: int, figural: set[str]) -
             if (not isinstance(skor, dict) or any(h not in skor for h in HURUF)
                     or any(not isinstance(skor[h], int) or not 1 <= skor[h] <= 5 for h in HURUF if h in skor)):
                 v.add(who, "skor TKP 1–5 untuk A–E tidak lengkap")
-        sid = f"{kat}-{nomor:03d}" if isinstance(nomor, int) else None
-        gb = s.get("gambar")
-        if gb:
+        if s.get("bergambar") is True:
             v.gambar += 1
-            if gb not in available:
-                v.add(who, f"gambar \"{gb}\" tidak ada di folder gambar/")
-        if sid in figural and not gb:
-            v.add(who, "soal bergambar tetapi \"gambar\" kosong")
-        if s.get("bergambar") and not gb:
-            v.add(who, "\"bergambar\": true tanpa \"gambar\"")
+            if kat != "TIU":
+                v.add(who, "\"bergambar\": true padahal bukan TIU (TWK & TKP harus false)")
+        for k in ("pertanyaan", "pembahasan"):
+            if k not in s:
+                v.add(who, f"kolom \"{k}\" tidak ada")
     return v
-
-
-def build_import_zip(dest: str | os.PathLike, doc: dict, images: dict[str, bytes]) -> Path:
-    """<paket>-siap-impor.zip berisi HANYA soal.json + gambar/*.png (yang dirujuk)."""
-    dest = Path(dest)
-    if dest.suffix.lower() != ".zip":
-        dest = dest.with_suffix(".zip")
-    used = sorted({s.get("gambar") for s in doc["soal"] if isinstance(s, dict) and s.get("gambar") in images})
-    names = ["soal.json"] + used
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".zip", dir=dest.parent)
-    os.close(fd)
-    try:
-        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("soal.json", json.dumps(doc, ensure_ascii=False, indent=1))
-            for path in used:
-                zf.writestr(path, images[path])
-        with zipfile.ZipFile(tmp) as zf:
-            if zf.testzip() is not None or sorted(zf.namelist()) != sorted(names):
-                raise ImportError_("ZIP siap impor tidak valid")
-        os.replace(tmp, dest)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    return dest
