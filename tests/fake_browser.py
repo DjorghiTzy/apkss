@@ -148,7 +148,8 @@ class FakeAlfaiz:
     def __init__(self, counts, height_of=lambda cat, n: 900 + (n * 173) % 1500, start_cat="TWK",
                  px_per_notch=53, dy_extra=None, load_s=0.0, anim_s=0.0, full_text=False,
                  card_border=False, sidebar_border=True, page_maker=None, black_after_nav=None,
-                 scroll_lag=None, blink=False):
+                 scroll_lag=None, blink=False, scrolling_header=False):
+        self.scrolling_header = scrolling_header       # header merah selebar layar yang ikut ter-scroll
         self.counts = counts
         self.black_after_nav = black_after_nav or {}   # (kat, n) -> detik layar hitam setelah dibuka
         self.scroll_lag = scroll_lag or {}             # (kat, n) -> detik browser telat merespons scroll
@@ -195,6 +196,9 @@ class FakeAlfaiz:
             page = self.pages[(self.cat, self.n)]
         part = page.crop((0, sy, w, min(page.height, sy + h)))
         scr.paste(part, (x, y))
+        if self.scrolling_header and sy < 40:                          # header ikut ter-scroll (tidak menempel)
+            d.rectangle([0, y, W, y + 39 - sy], fill=(147, 0, 18))
+            d.rectangle([600, y + 8 - sy, 690, y + 30 - sy], fill=(250, 250, 250))
         if now < self._black_until:                                    # layar hitam sesaat
             d.rectangle([x, y, x + w - 1, y + h - 1], fill="black")
         if self.blink and int(now / 0.04) % 2:                         # kursor berkedip

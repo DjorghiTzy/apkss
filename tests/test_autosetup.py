@@ -182,3 +182,14 @@ def test_black_screen_lagging_scroll_and_blinking_caret(tmp_path):
         with Image.open(pkg.path_of(it)) as im:
             assert option_rows(im) == 5, it.filename                 # tidak ada yang hitam / A–D saja
     assert not [p for p in rep.problems if "hitam" in p[1] or "baris pilihan" in p[1]], rep.problems
+
+
+def test_scrolling_full_width_header_does_not_widen_area(tmp_path):
+    """Kasus pengguna: header situs ikut ter-scroll -> kotak sempat selebar layar (area putih di kiri)."""
+    counts = {"TWK": 6, "TIU": 6, "TKP": 6}
+    b = FakeAlfaiz(counts, scrolling_header=True)
+    res = run_autosetup(b, ["TWK", "TIU", "TKP"], wait_load=0)
+    x, y, w, h = res.crop["rect"]
+    cx = FakeAlfaiz.CONTENT[0]
+    assert cx - 20 <= x <= cx, res.crop                     # mulai di tepi konten, bukan tepi layar
+    assert x + w < 1085                                      # tanpa sidebar

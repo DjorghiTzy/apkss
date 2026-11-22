@@ -70,7 +70,7 @@ def trim_for_export(img: Image.Image, margin: int = 10) -> Image.Image:
     diff = np.abs(a - bg).max(axis=2)
     content = diff > 12                                         # bukan latar polos
     mx, mn = a.max(axis=2), a.min(axis=2)
-    dark = (mx < 130) & (mx - mn < 40)                          # tulisan hitam / abu tua
+    dark = (mx < 170) & (mx - mn < 40)                          # tulisan hitam/abu (bukan tombol merah)
 
     rows = content.any(axis=1)
     if not rows.any():

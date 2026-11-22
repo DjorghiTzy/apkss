@@ -276,8 +276,12 @@ def detect_scroll_area(before: Image.Image, after: Image.Image, x_limit: int) ->
     if len(rows) < 50:
         raise SetupError("Halaman tidak bergeser saat di-scroll — buka soal yang pembahasannya panjang")
     y0, y1 = int(rows[0]), int(rows[-1])
-    # kolom teks = kolom yang banyak berubah saat scroll (tepi kartu hanya berubah di sudutnya)
-    cnt = diff[y0:y1 + 1].sum(axis=0)
+    # kolom teks = kolom yang banyak berubah saat scroll (tepi kartu hanya berubah di sudutnya).
+    # Baris yang berubah dari tepi ke tepi (header situs yang ikut ter-scroll) tidak dihitung,
+    # agar area putih di samping konten tidak ikut masuk.
+    band = diff[y0:y1 + 1]
+    full = band.sum(axis=1) >= 0.85 * band.shape[1]
+    cnt = band[~full].sum(axis=0)
     text = np.flatnonzero(cnt >= max(3, 0.03 * (y1 - y0 + 1)))
     c_l, c_r = (int(text[0]), int(text[-1])) if len(text) else (int(cols[0]), int(cols[-1]))
     region = a[y0:y1 + 1, c_l:c_r + 1].reshape(-1, 3)
