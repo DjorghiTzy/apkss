@@ -174,3 +174,20 @@ def make_long_question(q: int, height: int) -> Image.Image:
         y += 52
     y = text_lines(d, 20, y + 30, 25, rnd)
     return img.crop((0, 0, 760, y + 20))
+
+
+def make_capture_like_user(seed=1, left_pad=500, bottom_space=180):
+    """Seperti tangkapan pengguna: garis header di atas, area putih lebar di kiri, kartu bergaris tepi,
+    tombol Sebelumnya/Selanjutnya + ruang kosong di bawah."""
+    q, _ = make_alfaiz_question(seed, "text", header=False)
+    W = left_pad + q.width + 40
+    H = 30 + 60 + q.height + bottom_space
+    img = Image.new("RGB", (W, H), "white")
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, W, 2], fill=(139, 0, 0))                          # garis bawah header situs
+    d.text((left_pad + 10, 30), "< TRY OUT SKD CASN 2027 - PART 31", fill=(139, 0, 0))
+    img.paste(q, (left_pad, 70))
+    # q sudah memuat tombol Sebelumnya/Selanjutnya di bawah; tambah tepi kartu tipis
+    d.rounded_rectangle([left_pad - 6, 62, left_pad + q.width + 6, 70 + q.height + 60], radius=14,
+                        outline=(232, 232, 232))
+    return img, (left_pad, 30)

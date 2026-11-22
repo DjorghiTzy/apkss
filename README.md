@@ -201,6 +201,10 @@ Paket-01.zip
 └─ TKP/TKP-001.png … TKP-045.png      (nomor PER KATEGORI, 3 digit)
 ```
 
+Screenshot di ZIP dipangkas otomatis: mulai dari judul “TRY OUT SKD …” sampai kalimat terakhir
+pembahasan (mis. “Jawaban: C”); area putih di samping, tombol Sebelumnya/Selanjutnya, dan ruang
+kosong di bawahnya dibuang. File asli di workspace tidak diubah, jadi paket lama cukup diekspor ulang.
+
 Sebelum ekspor, aplikasi memperingatkan screenshot kosong/hitam, nomor yang hilang (dibanding
 TWK 30 / TIU 35 / TKP 45 atau jumlah di Tangkap Otomatis), dan nomor yang isinya ganda.
 

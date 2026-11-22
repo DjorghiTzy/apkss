@@ -674,8 +674,18 @@ class Package:
                 seen[it.fingerprint] = it.filename
         return issues
 
+    def trimmed_png(self, item: Item) -> bytes:
+        """Screenshot untuk ekspor: tanpa area putih di samping, tanpa tombol & ruang kosong di bawah."""
+        import io as _io
+        from .quality import trim_for_export
+        with Image.open(self.path_of(item)) as im:
+            out = trim_for_export(im)
+        buf = _io.BytesIO()
+        out.save(buf, "PNG", compress_level=3)
+        return buf.getvalue()
+
     def export_zip(self, dest: str | os.PathLike, figural: bool = True,
-                   extra: Optional[dict] = None) -> ZipResult:
+                   extra: Optional[dict] = None, trim: bool = True) -> ZipResult:
         """ZIP untuk ChatGPT: PROMPT.txt, daftar.json, TWK/TIU/TKP/*.png.
 
         extra: file tambahan di akar ZIP (mis. {"soal.json": bytes} untuk ZIP siap impor).
@@ -709,7 +719,10 @@ class Package:
                     zf.writestr("daftar.json", json.dumps(daftar, ensure_ascii=False, indent=1))
                     names += ["PROMPT.txt", "daftar.json"]
                 for it in assigned:
-                    zf.write(self.path_of(it), arcname=it.relpath)
+                    if trim:                                   # judul "TRY OUT …" s.d. kalimat terakhir
+                        zf.writestr(it.relpath, self.trimmed_png(it))
+                    else:
+                        zf.write(self.path_of(it), arcname=it.relpath)
                 for name, data in (extra or {}).items():
                     zf.writestr(name, data)
                     names.append(name)

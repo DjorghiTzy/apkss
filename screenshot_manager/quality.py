@@ -51,3 +51,44 @@ def option_rows(img: Image.Image) -> int:
                     bands += 1
                 start = None
     return bands
+
+
+def trim_for_export(img: Image.Image, margin: int = 10) -> Image.Image:
+    """Pangkas screenshot soal untuk ekspor: dari judul "TRY OUT …" sampai kalimat terakhir pembahasan.
+
+    - atas: lewati baris polos & garis/pita header yang membentang dari tepi ke tepi;
+    - bawah: berhenti di baris TULISAN GELAP terakhir (tombol Sebelumnya/Selanjutnya, ruang kosong,
+      dan tepi kartu di bawahnya dibuang);
+    - kiri/kanan: buang area putih polos di samping isi.
+    """
+    rgb = img.convert("RGB")
+    a = np.asarray(rgb, dtype=np.int16)
+    h, w = a.shape[:2]
+    smp = a[:: max(1, h // 200), :: max(1, w // 200)].reshape(-1, 3)
+    vals, cnt = np.unique(smp, axis=0, return_counts=True)
+    bg = vals[cnt.argmax()]
+    diff = np.abs(a - bg).max(axis=2)
+    content = diff > 12                                         # bukan latar polos
+    mx, mn = a.max(axis=2), a.min(axis=2)
+    dark = (mx < 130) & (mx - mn < 40)                          # tulisan hitam / abu tua
+
+    rows = content.any(axis=1)
+    if not rows.any():
+        return rgb
+    # atas: lewati pita/garis header yang menyentuh kedua tepi (hanya di bagian paling atas)
+    top = 0
+    limit = min(h, 160)
+    while top < limit and (not rows[top] or (content[top, :3].any() and content[top, -3:].any())):
+        top += 1
+    if top >= limit:
+        top = 0
+    while top < h and not rows[top]:
+        top += 1
+    # bawah: baris terakhir yang berisi tulisan gelap
+    dark_rows = np.flatnonzero(dark[top:].sum(axis=1) >= 2)
+    bottom = top + int(dark_rows[-1]) if len(dark_rows) else int(np.flatnonzero(rows)[-1])
+    # kiri/kanan: kolom berisi di antara top..bottom
+    cols = np.flatnonzero(content[top:bottom + 1].any(axis=0))
+    left, right = int(cols[0]), int(cols[-1])
+    box = (max(0, left - margin), max(0, top - margin), min(w, right + margin + 1), min(h, bottom + margin + 1))
+    return rgb.crop(box)
