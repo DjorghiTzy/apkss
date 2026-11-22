@@ -843,6 +843,8 @@ class MainWindow(QMainWindow):
         self._hotkey_hwnd = None
         self.setup_running = False
         self.screen_grabber = win_input.grab_screen if win_input.available() else None
+        from . import paketname
+        self.ocr = paketname.ocr_text                  # bisa diganti di tes
         self.driver_factory = win_input.WindowsDriver if win_input.available() else None
         self.last_item_id: str | None = None
         self._thumbs: dict[str, QPixmap] = {}
@@ -1643,26 +1645,44 @@ class MainWindow(QMainWindow):
         self.start_auto_capture(dlg.plan(), dlg.nav, dlg.sp_wait.value())
 
     def start_auto_capture(self, plan: Plan, nav: NavConfig, wait_load: float, delay_ms: int = 120):
+        """Sembunyikan jendela, baca judul (nama paket), lalu mulai."""
+        self.disarm(silent=True)
+        self.auto_running = True                       # F10 berikutnya = berhenti, sejak detik ini
+        self.auto_stop = threading.Event()
+        self.watcher.stop()
+        self.centralWidget().setEnabled(False)
+        self.hide()
+        QTimer.singleShot(delay_ms, lambda: self._begin_auto_capture(plan, nav, wait_load))
+
+    def _abort_start(self, msg: str):
+        self.auto_running = False
+        self.centralWidget().setEnabled(True)
+        self.watcher.start(self.ed_folder.text(), reset=False)
+        self.showNormal()
+        self.raise_()
+        self.error(msg)
+
+    def _begin_auto_capture(self, plan: Plan, nav: NavConfig, wait_load: float):
+        if self.auto_stop.is_set():                    # F10 ditekan lagi sebelum sempat mulai
+            return self._abort_start("Tangkap Otomatis dibatalkan")
+        if self.screen_grabber is not None:
+            try:
+                self._package_from_screen(self.screen_grabber())
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Gagal membaca judul paket: %s", exc)
+            self.centralWidget().setEnabled(False)
         cfg = RunConfig(crop=dict(self.settings["crop"] or {}), nav=nav, wait_load=wait_load)
         self.auto_worker = AutoWorker(self)
-        self.auto_stop = threading.Event()
         try:
             runner = AutoCapture(self.pkg, plan, cfg, self.driver_factory(), self.auto_worker.progress.emit,
                                  stop_event=self.auto_stop)
         except AutoCaptureError as exc:
-            self.showNormal()
-            self.raise_()
-            return self.error(str(exc))
-        self.disarm(silent=True)
-        self.auto_running = True
-        self.watcher.stop()
-        self.centralWidget().setEnabled(False)
-        self.log_event(f"Tangkap Otomatis dimulai: {len(plan.entries())} soal", "ok")
+            return self._abort_start(str(exc))
+        self.log_event(f"Tangkap Otomatis dimulai: {len(plan.entries())} soal — paket {self.pkg.name}", "ok")
         self.auto_worker.progress.connect(self._on_auto_progress)
         self.auto_worker.finished.connect(self._on_auto_finished)
         self.auto_worker.failed.connect(lambda m: self._on_auto_finished(None, m))
-        self.hide()                                   # langsung hilang (tanpa animasi minimize)
-        QTimer.singleShot(delay_ms, lambda: self.auto_worker.start(runner))
+        self.auto_worker.start(runner)
 
     def _setup_categories(self) -> list[str]:
         saved = (self.settings["auto"] or {}).get("sections") or []
@@ -1705,8 +1725,25 @@ class MainWindow(QMainWindow):
                             "Pastikan halaman PEMBAHASAN terbuka di browser (layar penuh) dengan Tipe Soal dan "
                             "seluruh Daftar Soal terlihat, lalu coba lagi.")
 
+    def _package_from_screen(self, screen) -> None:
+        """Pakai nama paket sesuai judul tryout di layar ("… PART 31" -> Paket-31)."""
+        from . import paketname
+        if screen is None:
+            return
+        part = paketname.detect_part(screen, ocr=self.ocr)
+        if part is None:
+            if paketname.ocr_available():
+                self.log_event("Judul “TRY OUT … PART nn” tidak terbaca — paket tetap " + self.pkg.name, "warn")
+            return
+        name = paketname.package_name(part)
+        if name != self.pkg.name:
+            self._open_package(name)
+            self.log_event(f"Paket otomatis dari judul halaman: PART {part} → {name}", "ok")
+        self.set_banner(f"Paket: {name} (dari judul TRY OUT … PART {part})", "info")
+
     def _on_setup_done(self, res):
         self._restore_after_setup()
+        self._package_from_screen(getattr(res, "screen", None))
         from dataclasses import asdict
         dlg = SetupResultDialog(self, res)
         if dlg.exec() != QDialog.Accepted or dlg.choice is None:
@@ -2303,7 +2340,31 @@ def _setup_logging():
     log.setLevel(logging.INFO)
 
 
+def _selftest_ocr() -> int:
+    """`ScreenshotManager.exe --selftest-ocr`: 0 = OCR membaca "PART 31"; 3 = modul OCR tidak ikut di build;
+    4 = tidak ada bahasa OCR di mesin ini; 1 = terbaca tapi salah."""
+    from PIL import ImageDraw, ImageFont
+    from . import paketname
+    if not paketname.ocr_available():
+        return 3
+    img = Image.new("RGB", (1366, 768), "white")
+    d = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arialbd.ttf", 18)
+    except OSError:
+        font = ImageFont.load_default()
+    d.text((440, 100), "< TRY OUT SKD CASN 2027 - PART 31", fill=(139, 0, 0), font=font)
+    text = paketname.ocr_text(img.crop((0, 0, 1366, 384)).resize((2732, 768)))
+    out = config_dir() / "selftest-ocr.txt"
+    out.write_text(text, encoding="utf-8")
+    if not text.strip():
+        return 4
+    return 0 if paketname.part_from_text(text) == 31 else 1
+
+
 def main() -> int:
+    if "--selftest-ocr" in sys.argv:
+        return _selftest_ocr()
     _setup_logging()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)

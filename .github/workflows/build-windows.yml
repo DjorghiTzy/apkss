@@ -71,6 +71,19 @@ jobs:
       - name: Build exe
         run: pyinstaller --noconfirm --clean ScreenshotManager.spec
 
+      - name: Uji OCR di .exe (nama paket dari judul "PART nn")
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\ScreenshotManager\ScreenshotManager.exe" -ArgumentList "--selftest-ocr" -Wait -PassThru
+          $code = $p.ExitCode
+          Write-Host "selftest-ocr exit code: $code"
+          $f = Join-Path $env:APPDATA "ScreenshotManager\selftest-ocr.txt"
+          if (Test-Path $f) { Write-Host "OCR:"; Get-Content $f }
+          if ($code -eq 3) { Write-Error "Modul OCR Windows tidak ikut di dalam .exe"; exit 1 }
+          if ($code -eq 1) { Write-Error "OCR membaca judul, tapi nomor PART salah"; exit 1 }
+          if ($code -eq 4) { Write-Host "::warning::Mesin build tidak punya bahasa OCR; .exe tetap memuat modul OCR" }
+          $global:LASTEXITCODE = 0
+
       - name: Portable zip
         shell: pwsh
         run: Compress-Archive -Path dist\ScreenshotManager -DestinationPath "dist\ScreenshotManager-${{ steps.ver.outputs.version }}-portable.zip"

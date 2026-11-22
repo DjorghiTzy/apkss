@@ -338,7 +338,7 @@ def test_point_pick_dialog_grid_preview(win, tmp_path):
     dlg.grab().save(str(tmp_path / "preview.png"))
 
 
-def test_f10_without_settings_runs_auto_setup_then_capture(win, monkeypatch):
+def test_f10_without_settings_runs_auto_setup_then_capture(win, monkeypatch, tmp_path):
     from screenshot_manager import app as appmod
     from tests.fake_browser import FakeAlfaiz
 
@@ -360,6 +360,8 @@ def test_f10_without_settings_runs_auto_setup_then_capture(win, monkeypatch):
     from PySide6.QtWidgets import QDialog
     monkeypatch.setattr(appmod.SetupResultDialog, "exec", fake_exec)
 
+    w.ocr = lambda img: "AL FAIZ\n< TRY OUT SKD CASN 2027 - PART 31"   # judul halaman (OCR tiruan)
+    w.screen_grabber = b.grab
     w.toggle_auto()                                     # F10 pertama kali
     assert w.setup_running
     assert wait_until(lambda: shown, timeout=120), info
@@ -369,6 +371,14 @@ def test_f10_without_settings_runs_auto_setup_then_capture(win, monkeypatch):
     assert wait_until(lambda: not w.auto_running, timeout=240)
     assert info and "SELESAI" in info[-1], info
     assert len(w.pkg.items) == 19
+    assert w.pkg.name == "Paket-31"                      # nama paket dari judul "PART 31"
+    dest = tmp_path / "zipdir"
+    seen_default = []
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        lambda *a, **k: (seen_default.append(a[2]) or "", ""))
+    monkeypatch.setattr(w.pkg, "export_check", lambda *a, **k: [])
+    w.make_zip()
+    assert seen_default and seen_default[0].endswith("Paket-31.zip")
     for cat, n in counts.items():
         for k in range(1, n + 1):
             assert w.pkg.find_slot(cat, k).height == b.page_of(cat, k).height

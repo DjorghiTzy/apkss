@@ -327,6 +327,7 @@ class SetupResult:
     counts: dict
     preview: Image.Image
     notes: list = field(default_factory=list)
+    screen: Optional[Image.Image] = None      # layar bersih (untuk membaca judul "PART nn")
 
 
 def run_autosetup(driver, categories: list[str], progress: Callable[[str], None] = lambda m: None,
@@ -499,4 +500,4 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
     if nav.category_dropdown:
         px, py = nav.category_dropdown
         d.ellipse([px - 12, py - 12, px + 12, py + 12], outline=(255, 45, 85), width=4)
-    return SetupResult(crop, nav, counts, preview, notes)
+    return SetupResult(crop, nav, counts, preview, notes, screen=top)

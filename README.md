@@ -177,6 +177,14 @@ Paket-01.zip
 Hanya gambar yang punya kategori & nomor yang dimasukkan. ZIP ditulis ke file sementara, diverifikasi
 (CRC + daftar isi), baru disimpan, jadi tidak pernah ada ZIP setengah jadi.
 
+## Nama paket otomatis
+
+Saat 🪄 Atur Otomatis dan saat Tangkap Otomatis dimulai (F10), aplikasi membaca judul halaman
+(mis. “TRY OUT SKD CASN 2027 - PART 31”) dengan OCR bawaan Windows (offline) dan memakai paket
+**Paket-31** — dibuat bila belum ada, dilanjutkan bila sudah ada. ZIP-nya menjadi `Paket-31.zip`
+dengan `"paket": "Paket 31"`. OCR hanya dipakai untuk nama paket; kategori & nomor soal tetap dari
+Tipe Soal dan Daftar Soal. Bila judul tidak terbaca, paket yang sedang aktif dipakai.
+
 ## Ekspor untuk SKD Intelligence
 
 Alur: **BUAT ZIP** → kirim ZIP + isi `PROMPT.txt` ke ChatGPT → ChatGPT mengembalikan ZIP yang

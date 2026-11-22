@@ -19,7 +19,10 @@ a = Analysis(
     pathex=["."],
     binaries=[],
     datas=[("assets/icon.ico", "assets"), ("assets/icon.png", "assets")],
-    hiddenimports=["watchdog.observers.read_directory_changes", "watchdog.observers.polling"],
+    hiddenimports=["watchdog.observers.read_directory_changes", "watchdog.observers.polling"] + (
+        ["winrt.windows.media.ocr", "winrt.windows.graphics.imaging", "winrt.windows.storage.streams",
+         "winrt.windows.foundation", "winrt.windows.foundation.collections", "winrt.windows.globalization"]
+        if sys.platform == "win32" else []),
     hookspath=[],
     runtime_hooks=[],
     excludes=EXCLUDES,
