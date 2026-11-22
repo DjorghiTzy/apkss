@@ -5,80 +5,97 @@ import pytest
 from PIL import Image
 
 from screenshot_manager.core import Package
-from screenshot_manager.figures import detect_figures
-from tests.fake_questions import make_question
+from screenshot_manager.figures import detect_question_figure
+from tests.fake_questions import make_alfaiz_question
 
 
-@pytest.mark.parametrize("seed", range(1, 9))
-def test_text_question_has_no_figures(seed):
-    img, truth = make_question(seed)
-    assert truth == []
-    assert detect_figures(img) == []
+@pytest.mark.parametrize("header", [True, False])
+@pytest.mark.parametrize("seed", range(1, 7))
+def test_text_and_table_questions_are_not_figural(seed, header):
+    """Logo AL FAIZ, tombol Tampilkan/Selanjutnya, badge Salah, tabel bergaris tipis: bukan gambar."""
+    for kind in ("text", "table"):
+        img, _ = make_alfaiz_question(seed, kind, header)
+        assert detect_question_figure(img).status == "none", kind
 
 
-def covers(fig, box, tol=12):
-    x, y, w, h = box
-    return (fig["x"] <= x + tol and fig["y"] <= y + tol and fig["x"] + fig["w"] >= x + w - tol
-            and fig["y"] + fig["h"] >= y + h - tol)
+@pytest.mark.parametrize("header", [True, False])
+@pytest.mark.parametrize("seed", range(1, 7))
+def test_figural_question_cropped_exactly(seed, header):
+    img, truth = make_alfaiz_question(seed, "figural", header)
+    r = detect_question_figure(img)
+    assert r.status == "ok", r.reason
+    b = r.box
+    x, y, w, h = truth
+    # panel + margin 12 px, tidak lebih
+    assert abs(b["x"] - (x + 4 - 12)) <= 2 and abs(b["y"] - (y - 12)) <= 2
+    assert abs(b["x"] + b["w"] - (x + w - 4 + 12)) <= 3 and abs(b["y"] + b["h"] - (y + h + 12)) <= 3
+    assert b["w"] >= 300 and b["h"] >= 100
+    crop = img.crop((b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"])).convert("RGB")
+    import numpy as np
+    a = np.asarray(crop, dtype=np.int16)
+    px = a.reshape(-1, 3).tolist()
+    assert not any(g > r_ + 40 and g > bb + 40 for r_, g, bb in px), "ada hijau"
+    assert not any(r_ > g + 60 and r_ > bb + 60 for r_, g, bb in px), "ada merah"
 
 
-@pytest.mark.parametrize("seed", range(1, 6))
-def test_figural_question_all_parts(seed):
-    img, truth = make_question(seed, fig_soal=True, fig_opsi=True, fig_pembahasan=True)
-    figs = detect_figures(img)
-    assert [f["bagian"] for f in figs] == [t[0] for t in truth], figs
-    for f, (_, box) in zip(figs, truth):
-        assert covers(f, box), (f, box)
-        assert f["w"] < box[2] + 40 and f["h"] < box[3] + 40, (f, box)     # tidak kebesaran
+@pytest.mark.parametrize("seed", range(1, 5))
+def test_images_inside_options_need_manual_cut(seed):
+    img, _ = make_alfaiz_question(seed, "opsi")
+    assert detect_question_figure(img).status == "manual"
 
 
-def test_only_question_figure():
-    img, truth = make_question(3, fig_soal=True)
-    figs = detect_figures(img)
-    assert [f["bagian"] for f in figs] == ["soal"]
-
-
-def test_zip_contains_figural_json_with_embedded_images(tmp_path):
+def build_package(tmp_path):
     pkg = Package(tmp_path / "ws", "Paket-01")
-    plain, _ = make_question(1)
-    fig, truth = make_question(2, fig_soal=True, fig_opsi=True)
-    plain.save(tmp_path / "a.png")
-    fig.save(tmp_path / "b.png")
-    pkg.add_image(tmp_path / "a.png", "TIU", 1)
-    it = pkg.add_image(tmp_path / "b.png", "TIU", 2).item
-    assert not it.figures_checked
-    assert len(pkg.update_figures(it.id)) == 6
+    plan = [("TWK", 1, "text"), ("TIU", 27, "figural"), ("TIU", 28, "figural"), ("TIU", 29, "opsi"),
+            ("TIU", 30, "table"), ("TKP", 1, "text")]
+    for i, (cat, n, kind) in enumerate(plan):
+        img, _ = make_alfaiz_question(i + 1, kind)
+        p = tmp_path / f"s{i}.png"
+        img.save(p)
+        pkg.add_image(p, cat, n)
+    return pkg
+
+
+def test_export_zip_structure_for_chatgpt(tmp_path):
+    pkg = build_package(tmp_path)
     res = pkg.export_zip(tmp_path / "Paket-01.zip")
-    assert res.figural == 1
+    assert res.path.name == "Paket-01.zip" and res.figural == 2 and res.manual_pending == 1
     with zipfile.ZipFile(res.path) as zf:
-        names = set(zf.namelist())
-        assert {"TIU/TIU-001.png", "TIU/TIU-002.png", "soal.json", "PROMPT.txt"} <= names
-        assert {f"figural/TIU-002/{i}.png" for i in range(1, 7)} <= names
-        assert not any(n.startswith("figural/TIU-001") for n in names)       # soal teks: tanpa gambar
-        man = json.loads(zf.read("soal.json"))
-        assert man["jumlah"] == {"TIU": 2, "total": 2, "bergambar": 1}
-        assert [e["id"] for e in man["soal"]] == ["TIU-001", "TIU-002"]
-        e1, e2 = man["soal"]
-        assert e1["bergambar"] is False and "gambar" not in e1
-        assert e2["bergambar"] is True and e2["file"] == "TIU/TIU-002.png"
-        assert [g["bagian"] for g in e2["gambar"]] == ["soal", "opsi A", "opsi B", "opsi C", "opsi D", "opsi E"]
-        g = e2["gambar"][0]
-        assert g["id"] == "TIU-002-1" and g["data"].startswith("data:image/png;base64,")
-        import base64, io
-        raw = base64.b64decode(g["data"].split(",", 1)[1])
-        assert Image.open(io.BytesIO(raw)).size == (g["kotak"]["w"], g["kotak"]["h"])
-        assert zf.read(g["file"]) == raw
+        names = sorted(zf.namelist())
+        assert names == sorted(["PROMPT.txt", "daftar.json", "TWK/TWK-001.png", "TIU/TIU-027.png",
+                                "TIU/TIU-028.png", "TIU/TIU-029.png", "TIU/TIU-030.png", "TKP/TKP-001.png",
+                                "gambar/TIU-027.png", "gambar/TIU-028.png"])
+        daftar = json.loads(zf.read("daftar.json"))
+        assert daftar["paket"] == "Paket 01"
+        assert daftar["bergambar"] == ["TIU-027", "TIU-028"]
+        assert daftar["screenshot"][0] == {"id": "TWK-001", "kategori": "TWK", "nomor": 1, "file": "TWK/TWK-001.png"}
+        assert len(daftar["screenshot"]) == 6
         prompt = zf.read("PROMPT.txt").decode()
-        assert "SEKALIGUS" in prompt and "2 soal" in prompt
-    # tandai bukan bergambar -> tidak ada gambar
-    pkg.set_figural(it.id, False)
+        assert "Kerjakan SEMUA 6 soal" in prompt
+        assert "Hanya soal ini yang bergambar: TIU 27 (gambar/TIU-027.png), TIU 28 (gambar/TIU-028.png)." in prompt
+        assert '"paket": "Paket 01"' in prompt and "{{" not in prompt
+        for n in zf.namelist():                                   # tidak ada base64 di mana pun
+            if n.endswith((".txt", ".json")):
+                assert "data:image" not in zf.read(n).decode() and ";base64," not in zf.read(n).decode()
+        with zf.open("gambar/TIU-027.png") as f:
+            g = Image.open(f)
+            assert g.size[0] >= 300 and g.size[1] >= 100
+
+
+def test_manual_cut_and_drop(tmp_path):
+    pkg = build_package(tmp_path)
+    opsi = pkg.find_slot("TIU", 29)
+    pkg.update_figures(opsi.id)
+    assert opsi.figure_manual and not opsi.figures
+    pkg.set_figure_box(opsi.id, {"x": 20, "y": 120, "w": 400, "h": 150})
+    assert opsi.figures == [{"x": 20, "y": 120, "w": 400, "h": 150}] and not opsi.figure_manual
+    assert opsi.figure_by_hand
+    pkg.update_figures(opsi.id)                                    # potongan manual tidak ditimpa
+    assert opsi.figures[0]["w"] == 400
+    pkg.set_figural(pkg.find_slot("TIU", 28).id, False)            # buang
     res = pkg.export_zip(tmp_path / "x.zip")
-    assert res.figural == 0
     with zipfile.ZipFile(res.path) as zf:
-        assert not any(n.startswith("figural/") for n in zf.namelist())
-        assert json.loads(zf.read("soal.json"))["soal"][1]["bergambar"] is False
-    # tanpa opsi figural di ZIP
-    pkg.set_figural(it.id, True)
-    res = pkg.export_zip(tmp_path / "y.zip", figural=False)
-    with zipfile.ZipFile(res.path) as zf:
-        assert sorted(zf.namelist()) == ["TIU/TIU-001.png", "TIU/TIU-002.png"]
+        assert sorted(n for n in zf.namelist() if n.startswith("gambar/")) == ["gambar/TIU-027.png",
+                                                                               "gambar/TIU-029.png"]
+        assert json.loads(zf.read("daftar.json"))["bergambar"] == ["TIU-027", "TIU-029"]
+    assert res.manual_pending == 0

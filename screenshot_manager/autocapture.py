@@ -676,7 +676,7 @@ class AutoCapture:
         if not entries:
             raise AutoCaptureError("Rencana soal kosong")
         from .core import image_fingerprint, make_filename
-        from .figures import detect_figures
+        from .figures import detect_question_figure
         # penyimpanan (sambung + tulis PNG + deteksi gambar) di thread lain: penangkap langsung lanjut
         saver = ThreadPoolExecutor(max_workers=1)
         saves = []
@@ -684,10 +684,9 @@ class AutoCapture:
 
         def save(parts, cat, num, local):
             res = self.pkg.add_capture(parts, cat, num, source=f"otomatis:{cat} {local}")
-            figs = [] if res.item.figures_off else detect_figures(res.image)
-            res.item.figures, res.item.figures_checked = figs, True
+            self.pkg.apply_figure_result(res.item, detect_question_figure(res.image))
             self.pkg.save()
-            return res.item, figs
+            return res.item, res.item.figures
 
         try:
             self.d.move(*self.park)
@@ -759,26 +758,3 @@ class AutoCapture:
             rep.notches = self.notches
             rep.seconds = time.monotonic() - t_start
         return rep
-
-    def _apply_figures(self, pending: dict, wait: bool):
-        changed = False
-        for item_id in list(pending):
-            fut = pending[item_id]
-            if not wait and not fut.done():
-                continue
-            pending.pop(item_id)
-            try:
-                result = fut.result()
-            except Exception:  # noqa: BLE001
-                result = []
-            try:
-                it = self.pkg.get(item_id)
-            except ManagerError:
-                continue
-            if not it.figures_off:
-                it.figures, it.figures_checked = result, True
-                changed = True
-                if result:
-                    self.progress(f"  🖼 {it.filename}: soal bergambar, {len(result)} gambar")
-        if changed:
-            self.pkg.save()

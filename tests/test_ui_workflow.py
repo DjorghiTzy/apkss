@@ -138,7 +138,7 @@ def test_claude_workflow(win, tmp_path, monkeypatch):
     w.make_zip()
     with zipfile.ZipFile(dest) as zf:
         assert zf.testzip() is None
-        assert "soal.json" in zf.namelist() and "PROMPT.txt" in zf.namelist()
+        assert "daftar.json" in zf.namelist() and "PROMPT.txt" in zf.namelist()
         assert sorted(n for n in zf.namelist() if n.endswith(".png")) == ["TIU/TIU-001.png", "TKP/TKP-010.png", "TKP/TKP-011.png",
                                          "TWK/TWK-001.png", "TWK/TWK-002.png"]
         with Image.open(zf.open("TIU/TIU-001.png")) as im:
@@ -362,67 +362,62 @@ def test_f10_without_settings_runs_auto_setup_then_capture(win, monkeypatch):
             assert w.pkg.find_slot(cat, k).height == b.page_of(cat, k).height
 
 
-def test_figural_question_in_window_and_zip(win, tmp_path, monkeypatch):
-    from tests.fake_questions import make_question
 
-    w, shots = win, win._shots
-    w.select_category("TIU")
-    w.set_number(7)
-    w.arm()
-    fig, _ = make_question(4, fig_soal=True, fig_opsi=True)
-    fig.save(shots / "figural.png")
-    plain, _ = make_question(5)
-    assert wait_until(lambda: w.pkg.find_slot("TIU", 7) is not None)
-    plain.save(shots / "teks.png")
-    assert wait_until(lambda: w.pkg.find_slot("TIU", 8) is not None)
-    w.refresh_table()
-    cells = {w.table.item(r, 3).text(): w.table.item(r, 5).text() for r in range(w.table.rowCount())}
-    assert cells["TIU-007.png"] == "🖼 6" and cells["TIU-008.png"] == "—", cells
-    assert "🖼 1" in w.lbl_counts.text()
-
-    dest = tmp_path / "Paket-01.zip"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(dest), ""))
-    w.make_zip()
-    with zipfile.ZipFile(dest) as zf:
-        names = zf.namelist()
-    assert "soal.json" in names and "figural/TIU-007/1.png" in names
-    assert not any("TIU-008" in n for n in names if n.startswith("figural/"))
-
-    # tandai bukan bergambar dari menu
-    r = next(r for r in range(w.table.rowCount()) if w.table.item(r, 3).text() == "TIU-007.png")
-    w.table.selectRow(r)
-    w.set_figural(False)
-    assert w.pkg.find_slot("TIU", 7).figures == []
-    w.chk_figural.setChecked(False)
-    w.make_zip()
-    with zipfile.ZipFile(dest) as zf:
-        assert not any(n.startswith("figural/") for n in zf.namelist())
-        assert "soal.json" not in zf.namelist()
-
-
-def test_merge_button_creates_complete_json(win, tmp_path, monkeypatch):
+def test_figure_preview_export_and_import_zip(win, tmp_path, monkeypatch):
     import json as _json
 
-    from tests.fake_questions import make_question
+    from screenshot_manager import app as appmod
+    from tests.fake_questions import make_alfaiz_question
 
     w, shots = win, win._shots
     w.select_category("TIU")
     w.set_number(27)
     w.arm()
-    fig, _ = make_question(9, fig_soal=True)
-    fig.save(shots / "fig.png")
-    assert wait_until(lambda: w.pkg.find_slot("TIU", 27) is not None)
-    ai = tmp_path / "Paket-01.json"
-    ai.write_text(_json.dumps({"paket": "Paket-01", "soal": [
-        {"id": "TIU-027", "kategori": "TIU", "nomor": 27, "pertanyaan": "pola [GAMBAR:TIU-027-1]",
-         "gambar": ["TIU-027-1"]}]}))
-    out = tmp_path / "Paket-01-lengkap.json"
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(ai), ""))
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    for i, kind in enumerate(["figural", "opsi", "text"]):
+        make_alfaiz_question(i + 1, kind)[0].save(shots / f"q{i}.png")
+        assert wait_until(lambda i=i: w.pkg.find_slot("TIU", 27 + i) is not None)
+    w.refresh_table()
+    col = {w.table.item(r, 3).text(): w.table.item(r, 5).text() for r in range(w.table.rowCount())}
+    assert col == {"TIU-027.png": "🖼", "TIU-028.png": "✂ manual", "TIU-029.png": "—"}, col
+
+    # pratinjau sebelum ekspor: potong manual TIU-028 (kotak digeser), lalu lanjut
     shown = []
-    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[2]))
-    w.merge_json()
-    data = _json.loads(out.read_text())
-    g = data["soal"][0]["gambar"]
-    assert [x["id"] for x in g] == ["TIU-027-1"] and g[0]["data"].startswith("data:image/png;base64,")
-    assert shown and "1 gambar ditanam" in shown[0]
+
+    def fake_preview_exec(dlg):
+        shown.append([it.filename for it in dlg._items()])
+        it = w.pkg.find_slot("TIU", 28)
+        monkeypatch.setattr(appmod.FigureBoxDialog, "exec", lambda self: QDialog.Accepted)
+        dlg._cut(it)
+        return QDialog.Accepted
+    from PySide6.QtWidgets import QDialog
+    monkeypatch.setattr(appmod.FigurePreviewDialog, "exec", fake_preview_exec)
+    dest = tmp_path / "Paket-01.zip"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(dest), ""))
+    w.make_zip()
+    assert shown == [["TIU-027.png", "TIU-028.png"]]
+    with zipfile.ZipFile(dest) as zf:
+        assert sorted(n for n in zf.namelist() if n.startswith("gambar/")) == ["gambar/TIU-027.png",
+                                                                               "gambar/TIU-028.png"]
+        assert _json.loads(zf.read("daftar.json"))["bergambar"] == ["TIU-027", "TIU-028"]
+
+    # soal.json dari ChatGPT (ditempel) -> ZIP siap impor
+    sub = {27: "Serial Figural", 28: "Analogi Figural", 29: "Silogisme"}
+    soal = [{"kategori": "TIU", "nomor": n, "subtopik": sub[n], "pertanyaan": "Perhatikan gambar! [gambar]",
+             "opsi": {h: "" for h in "ABCDE"}, "jawaban": "B", "skor": None,
+             "bergambar": n != 29, "gambar": f"gambar/TIU-{n:03d}.png" if n != 29 else None,
+             "pembahasan": "x", "catatan": None} for n in (27, 28, 29)]
+    dlg = appmod.ImportDialog(w)
+    dlg.text.setPlainText("```json\n" + _json.dumps({"paket": "Paket 01", "soal": soal}) + "\n```")
+    dlg._check()
+    assert dlg.b_make.isEnabled() and "3 soal, 2 gambar" in dlg.summary.text()
+    out = tmp_path / "Paket-01-siap-impor.zip"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    info = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a[2]))
+    dlg._make()
+    with zipfile.ZipFile(out) as zf:
+        assert sorted(zf.namelist()) == ["gambar/TIU-027.png", "gambar/TIU-028.png", "soal.json"]
+        data = _json.loads(zf.read("soal.json"))
+    t = data["soal"][0]
+    assert t["pertanyaan"] == "Perhatikan gambar!" and t["kunci"] == "B" and "pilihan" in t and "opsi" not in t
+    assert info and "3 soal, 2 gambar. Unggah di SKD Intelligence → Impor Soal → Unggah ZIP." in info[0]

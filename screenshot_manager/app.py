@@ -13,7 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPen,
                            QKeySequence, QPixmap)
-from PySide6.QtWidgets import (QMenu, QProgressDialog, QDoubleSpinBox, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
+from PySide6.QtWidgets import (QMenu, QPlainTextEdit, QProgressDialog, QDoubleSpinBox, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
                                QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
                                QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -692,6 +692,257 @@ class AutoWorker(QObject):
         threading.Thread(target=run, daemon=True).start()
 
 
+class MovableBoxCanvas(CropCanvas):
+    """Kotak seleksi: seret di dalam kotak untuk MENGGESER, seret di luar untuk membuat kotak baru."""
+
+    def mousePressEvent(self, e):
+        p = self._img_point(e.position().toPoint())
+        if self.sel.width() > 2 and self.sel.contains(p):
+            self._move_from = p
+            self._start = None
+        else:
+            self._move_from = None
+            super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if getattr(self, "_move_from", None) is not None:
+            p = self._img_point(e.position().toPoint())
+            d = p - self._move_from
+            r = self.sel.translated(d)
+            r.moveLeft(min(max(0, r.left()), self.src.width() - r.width()))
+            r.moveTop(min(max(0, r.top()), self.src.height() - r.height()))
+            self.sel, self._move_from = r, p
+            self.update()
+            self.on_change()
+        else:
+            super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if getattr(self, "_move_from", None) is not None:
+            self._move_from = None
+        else:
+            super().mouseReleaseEvent(e)
+
+
+class FigureBoxDialog(QDialog):
+    """Potong manual gambar soal: kotak bisa digeser atau digambar ulang."""
+
+    def __init__(self, parent, path: Path, box: dict | None, title: str):
+        super().__init__(parent)
+        self.setWindowTitle(f"Potong gambar — {title}")
+        pm = QPixmap(str(path))
+        rect = QRect(box["x"], box["y"], box["w"], box["h"]) if box else QRect()
+        self.canvas = MovableBoxCanvas(pm, rect)
+        self.info = QLabel()
+        self.canvas.on_change = self._upd
+        area = QScrollArea()
+        area.setWidget(self.canvas)
+        area.setWidgetResizable(False)
+        geo = QApplication.primaryScreen().availableGeometry()
+        area.setMinimumSize(min(self.canvas.width() + 24, int(geo.width() * 0.9)),
+                            min(self.canvas.height() + 24, int(geo.height() * 0.7)))
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Seret di <b>dalam</b> kotak untuk menggeser, di <b>luar</b> kotak untuk membuat kotak "
+                             "baru. Kotak hanya berisi gambar soal — tanpa warna hijau/merah pilihan jawaban."))
+        lay.addWidget(area)
+        lay.addWidget(self.info)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self._upd()
+
+    def _upd(self):
+        r = self.canvas.sel
+        self.info.setText(f"Kotak: {r.width()}×{r.height()}px di ({r.x()},{r.y()})" if r.width() > 2
+                          else "Belum ada kotak")
+
+    def box(self) -> dict | None:
+        r = self.canvas.sel
+        return {"x": r.x(), "y": r.y(), "w": r.width(), "h": r.height()} if r.width() > 10 else None
+
+    @staticmethod
+    def cut(parent, pkg, item) -> bool:
+        start = (item.figures[0] if item.figures else item.figure_hint) or \
+            {"x": 20, "y": max(0, item.height // 6), "w": max(50, item.width - 40), "h": 160}
+        dlg = FigureBoxDialog(parent, pkg.path_of(item), start, item.display_name)
+        if dlg.exec() != QDialog.Accepted or dlg.box() is None:
+            return False
+        pkg.set_figure_box(item.id, dlg.box())
+        return True
+
+
+class FigurePreviewDialog(QDialog):
+    """Pratinjau semua potongan gambar sebelum ekspor: buang / potong ulang per soal."""
+
+    def __init__(self, win: "MainWindow", for_export: bool = False):
+        super().__init__(win)
+        self.win, self.pkg = win, win.pkg
+        self.setWindowTitle("Pratinjau gambar soal bergambar")
+        self.lay = QVBoxLayout(self)
+        self.head = QLabel()
+        self.head.setWordWrap(True)
+        self.lay.addWidget(self.head)
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.lay.addWidget(self.area, 1)
+        bb = QDialogButtonBox()
+        if for_export:
+            self.b_ok = bb.addButton("Lanjut Ekspor ZIP", QDialogButtonBox.AcceptRole)
+            self.b_ok.setStyleSheet("font-weight:bold; background:#1f6feb; color:white; padding:6px 14px")
+            bb.addButton("Batal", QDialogButtonBox.RejectRole)
+        else:
+            bb.addButton("Tutup", QDialogButtonBox.AcceptRole)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        self.lay.addWidget(bb)
+        geo = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(1000, int(geo.width() * 0.8)), int(geo.height() * 0.8))
+        self._build()
+
+    def _items(self):
+        return [it for it in self.pkg.sorted_items() if it.assigned and not it.figures_off
+                and (it.figures or it.figure_manual)]
+
+    def _build(self):
+        items = self._items()
+        ok = sum(1 for it in items if it.figures)
+        todo = sum(1 for it in items if not it.figures)
+        self.head.setText(f"<b>{ok} soal bergambar</b> akan masuk folder gambar/."
+                          + (f" <span style='color:#b35c00'><b>{todo} soal perlu dipotong manual</b> "
+                             "(gambar di pilihan jawaban) — klik “Potong” atau “Buang”.</span>" if todo else "")
+                          + " Pastikan tiap potongan hanya berisi gambar soal.")
+        box = QWidget()
+        grid = QGridLayout(box)
+        for r, it in enumerate(items):
+            name = QLabel(f"<b>{it.display_name}</b><br>"
+                          + ("manual" if it.figure_by_hand else "otomatis" if it.figures else
+                             "<span style='color:#b35c00'>perlu dipotong manual</span>"))
+            pic = QLabel()
+            if it.figures:
+                img = QPixmap()
+                img.loadFromData(self.pkg.figure_png(it))
+                pic.setPixmap(img.scaled(560, 220, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                pic.setText("—")
+            b_cut = QPushButton("Potong Ulang" if it.figures else "Potong")
+            b_drop = QPushButton("Buang")
+            b_cut.clicked.connect(lambda _=False, i=it: self._cut(i))
+            b_drop.clicked.connect(lambda _=False, i=it: self._drop(i))
+            grid.addWidget(name, r, 0)
+            grid.addWidget(pic, r, 1)
+            grid.addWidget(b_cut, r, 2)
+            grid.addWidget(b_drop, r, 3)
+        if not items:
+            grid.addWidget(QLabel("Tidak ada soal bergambar."), 0, 0)
+        self.area.setWidget(box)
+
+    def _cut(self, it):
+        if FigureBoxDialog.cut(self, self.pkg, it):
+            self._build()
+
+    def _drop(self, it):
+        self.pkg.set_figural(it.id, False)
+        self._build()
+
+
+class ImportDialog(QDialog):
+    """Buat ZIP siap impor SKD Intelligence dari soal.json hasil ChatGPT."""
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win)
+        from . import skdimport
+        self.sk, self.win, self.pkg = skdimport, win, win.pkg
+        self.doc = None
+        self.setWindowTitle("Buat ZIP siap impor — SKD Intelligence")
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Tempel isi <b>soal.json</b> dari ChatGPT di bawah, atau pilih filenya."))
+        row = QHBoxLayout()
+        b_file = QPushButton("Pilih file soal.json…")
+        b_file.clicked.connect(self._pick)
+        b_check = QPushButton("Periksa")
+        b_check.clicked.connect(self._check)
+        row.addWidget(b_file)
+        row.addWidget(b_check)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.text = QPlainTextEdit()
+        self.text.setPlaceholderText('{"paket": "Paket 01", "soal": [ ... ]}')
+        lay.addWidget(self.text, 2)
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        lay.addWidget(self.summary)
+        self.issues = QListWidget()
+        lay.addWidget(self.issues, 2)
+        bb = QDialogButtonBox()
+        self.b_make = bb.addButton("Buat ZIP siap impor", QDialogButtonBox.AcceptRole)
+        self.b_make.setEnabled(False)
+        self.b_make.setStyleSheet("font-weight:bold")
+        bb.addButton("Tutup", QDialogButtonBox.RejectRole)
+        bb.accepted.connect(self._make)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        geo = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(900, int(geo.width() * 0.7)), int(geo.height() * 0.75))
+
+    def _pick(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Pilih soal.json",
+                                           self.win.settings["zip_dir"] or str(Path.home() / "Downloads"),
+                                           "JSON (*.json *.txt)")
+        if f:
+            self.text.setPlainText(Path(f).read_text(encoding="utf-8-sig"))
+            self._check()
+
+    def _images(self) -> dict:
+        return {f"gambar/{it.filename}": self.pkg.figure_png(it) for it in self.pkg.figural_items()}
+
+    def _check(self):
+        self.issues.clear()
+        self.b_make.setEnabled(False)
+        try:
+            doc, changes = self.sk.clean(self.sk.parse_soal_json(self.text.toPlainText()))
+        except ValueError as exc:
+            self.summary.setText(f"✖ {exc}")
+            return
+        self.images = self._images()
+        expected = sum(1 for it in self.pkg.items if it.assigned)
+        figural = {Path(it.filename).stem for it in self.pkg.figural_items()}
+        v = self.sk.validate(doc, set(self.images), expected, figural)
+        self.doc = doc
+        for c in changes:
+            self.issues.addItem(QListWidgetItem(f"🧹 dibersihkan: {c}"))
+        for who, msg in v.issues:
+            it = QListWidgetItem(f"⚠ {who}: {msg}")
+            it.setForeground(QColor("#8a6100"))
+            self.issues.addItem(it)
+        self.summary.setText(f"<b>{v.total} soal, {v.gambar} gambar.</b> "
+                             + (f"<span style='color:#8a6100'>{len(v.issues)} masalah ditemukan — boleh tetap "
+                                "lanjut.</span>" if v.issues else "<span style='color:#0b7a32'>Tidak ada masalah."
+                                                                  "</span>"))
+        self.b_make.setEnabled(True)
+
+    def _make(self):
+        if self.doc is None:
+            return
+        start = self.win.settings["zip_dir"] or str(Path.home() / "Downloads")
+        dest, _ = QFileDialog.getSaveFileName(self, "Simpan ZIP siap impor",
+                                              str(Path(start) / f"{self.pkg.name}-siap-impor.zip"),
+                                              "Arsip ZIP (*.zip)")
+        if not dest:
+            return
+        try:
+            out = self.sk.build_import_zip(dest, self.doc, self.images)
+        except (ValueError, OSError) as exc:
+            return QMessageBox.warning(self, "Buat ZIP siap impor", f"Gagal: {exc}")
+        n_soal = len(self.doc["soal"])
+        n_img = sum(1 for s in self.doc["soal"] if isinstance(s, dict) and s.get("gambar") in self.images)
+        msg = f"{n_soal} soal, {n_img} gambar. Unggah di SKD Intelligence → Impor Soal → Unggah ZIP."
+        self.win.set_banner(f"✔ {out.name}: {msg}", "ok")
+        self.win.log_event(f"ZIP siap impor: {out} — {msg}", "ok")
+        QMessageBox.information(self, "ZIP siap impor", f"{out}\n\n{msg}")
+        self.accept()
+
+
 class UpdateWorker(QObject):
     """Menjalankan cek/unduh update di thread terpisah agar UI tidak macet."""
     checked = Signal(object, bool)      # ReleaseInfo, silent
@@ -865,16 +1116,15 @@ class MainWindow(QMainWindow):
         self.btn_zip.clicked.connect(self.make_zip)
         zipbox.addWidget(self.lbl_counts)
         zipbox.addWidget(self.btn_zip)
-        self.chk_figural = QCheckBox("Sertakan soal.json + PROMPT (semua kategori)")
-        self.chk_figural.setToolTip("ZIP juga berisi soal.json (SEMUA soal TWK, TIU, TKP dalam satu file, "
-                                    "termasuk gambar soal bergambar sebagai base64), PROMPT.txt (satu prompt "
-                                    "untuk semua soal), dan folder figural/ berisi potongan gambar.")
+        self.chk_figural = QCheckBox("Sertakan PROMPT.txt + daftar.json + gambar/")
+        self.chk_figural.setToolTip("ZIP untuk ChatGPT: PROMPT.txt (terisi otomatis), daftar.json, dan gambar/ "
+                                    "berisi potongan soal bergambar saja. Tanpa base64.")
         zipbox.addWidget(self.chk_figural)
-        self.btn_merge = QPushButton("🖼 Gabungkan Gambar ke JSON…")
-        self.btn_merge.setToolTip("Pilih JSON hasil AI (berisi penanda [GAMBAR:...]); gambar asli ditanam ke "
-                                  "setiap soal sehingga jadi satu file JSON lengkap.")
-        self.btn_merge.clicked.connect(self.merge_json)
-        zipbox.addWidget(self.btn_merge)
+        self.btn_import = QPushButton("📦 Buat ZIP siap impor…")
+        self.btn_import.setToolTip("Tempel / pilih soal.json dari ChatGPT → divalidasi & dibersihkan → "
+                                   "<paket>-siap-impor.zip (soal.json + gambar/) untuk SKD Intelligence.")
+        self.btn_import.clicked.connect(self.open_import_dialog)
+        zipbox.addWidget(self.btn_import)
         bottom.addLayout(zipbox)
         outer.addLayout(bottom)
 
@@ -1057,8 +1307,10 @@ class MainWindow(QMainWindow):
         b_fig = QPushButton("🖼 Gambar ▾")
         b_fig.setToolTip("Soal bergambar (figural): gambar di dalam soal ikut diekspor sebagai JSON")
         m_fig = QMenu(b_fig)
+        m_fig.addAction("Pratinjau semua potongan gambar…", lambda: FigurePreviewDialog(self).exec())
+        m_fig.addAction("Potong manual (baris terpilih)…", self.cut_figure_selected)
         m_fig.addAction("Deteksi ulang gambar (baris terpilih)", lambda: self.set_figural(True))
-        m_fig.addAction("Tandai BUKAN soal bergambar", lambda: self.set_figural(False))
+        m_fig.addAction("Buang gambar / BUKAN soal bergambar", lambda: self.set_figural(False))
         b_fig.setMenu(m_fig)
         b_ws = QPushButton("Buka Workspace")
         b_ws.clicked.connect(lambda: self.open_path(self.pkg.root))
@@ -1436,9 +1688,14 @@ class MainWindow(QMainWindow):
             c = QTableWidgetItem("bukan")
             c.setToolTip("Ditandai bukan soal bergambar")
         elif it.figures:
-            c = QTableWidgetItem(f"🖼 {len(it.figures)}")
-            c.setToolTip("Soal bergambar: " + ", ".join(f["bagian"] for f in it.figures))
+            c = QTableWidgetItem("🖼 manual" if it.figure_by_hand else "🖼")
+            f = it.figures[0]
+            c.setToolTip(f"Soal bergambar → gambar/{it.filename} ({f['w']}×{f['h']}px)")
             c.setForeground(QColor("#6f42c1"))
+        elif it.figure_manual:
+            c = QTableWidgetItem("✂ manual")
+            c.setToolTip("Gambar ada di pilihan jawaban — potong manual (🖼 Gambar ▾ → Potong manual)")
+            c.setForeground(QColor("#b35c00"))
         else:
             c = QTableWidgetItem("—" if it.figures_checked else "?")
         return c
@@ -1449,8 +1706,9 @@ class MainWindow(QMainWindow):
         except ManagerError:
             return
         if figs:
-            self.log_event(f"🖼 {item.display_name}: soal bergambar, {len(figs)} gambar "
-                           f"({', '.join(f['bagian'] for f in figs)})", "ok")
+            self.log_event(f"🖼 {item.display_name}: soal bergambar → gambar/{item.filename}", "ok")
+        elif item.figure_manual:
+            self.log_event(f"✂ {item.display_name}: gambar di pilihan jawaban — perlu dipotong manual", "warn")
 
     def set_figural(self, on: bool):
         sel = self.selected_items()
@@ -1458,9 +1716,18 @@ class MainWindow(QMainWindow):
             return self.error("Pilih baris di daftar terlebih dahulu")
         for it in sel:
             figs = self.pkg.set_figural(it.id, on)
-            self.log_event(f"{it.display_name}: " + (f"{len(figs)} gambar terdeteksi" if on
+            self.log_event(f"{it.display_name}: " + (("gambar terdeteksi" if figs else "tidak ada gambar") if on
                                                       else "ditandai bukan soal bergambar"))
+        self._thumbs.clear()
         self.refresh_table()
+
+    def cut_figure_selected(self):
+        sel = self.selected_items()
+        if not sel or not sel[0].assigned:
+            return self.error("Pilih satu soal di daftar terlebih dahulu")
+        if FigureBoxDialog.cut(self, self.pkg, sel[0]):
+            self.log_event(f"✂ {sel[0].display_name}: gambar dipotong manual", "ok")
+            self.refresh_table(select_id=sel[0].id)
 
     def remove_last_part(self):
         sel = self.selected_items()
@@ -1930,16 +2197,17 @@ class MainWindow(QMainWindow):
         if pm.isNull():
             self.preview.setText("File tidak ditemukan")
         else:
-            if it.figures:                                 # tandai gambar yang terdeteksi
+            if it.figures or it.figure_hint:               # tandai potongan gambar
                 p = QPainter(pm)
-                p.setPen(QPen(QColor("#6f42c1"), max(3, pm.width() // 250)))
-                for f in it.figures:
+                for f, col, style in ([(it.figures[0], "#6f42c1", Qt.SolidLine)] if it.figures else
+                                      [(it.figure_hint, "#b35c00", Qt.DashLine)]):
+                    p.setPen(QPen(QColor(col), max(3, pm.width() // 250), style))
                     p.drawRect(QRect(f["x"], f["y"], f["w"], f["h"]))
                 p.end()
             self.preview.setPixmap(pm.scaled(self.preview.size() - QSize(8, 8),
                                              Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        figs = (f"<br>🖼 <b>Soal bergambar</b>: {len(it.figures)} gambar ("
-                + ", ".join(f["bagian"] for f in it.figures) + ") — kotak ungu") if it.figures else ""
+        figs = (f"<br>🖼 <b>Soal bergambar</b> → gambar/{it.filename} (kotak ungu)" if it.figures else
+                "<br>✂ <b>Perlu dipotong manual</b> (gambar di pilihan jawaban)" if it.figure_manual else "")
         self.preview_info.setText(f"<b>{it.display_name}</b><br>{it.width}×{it.height}px{figs}<br>"
                                   f"Workspace: {path}<br>Asli: {it.source}")
 
@@ -2032,6 +2300,19 @@ class MainWindow(QMainWindow):
                 self, "BUAT ZIP", f"{unassigned} gambar belum punya kategori/nomor dan TIDAK akan "
                                   "masuk ZIP.\nLanjutkan?") != QMessageBox.Yes:
             return
+        if self.chk_figural.isChecked():
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                for it in self.pkg.items:
+                    if it.assigned:
+                        self.pkg.update_figures(it.id)
+            finally:
+                QApplication.restoreOverrideCursor()
+            if any(it.assigned and (it.figures or it.figure_manual) for it in self.pkg.items):
+                if FigurePreviewDialog(self, for_export=True).exec() != QDialog.Accepted:
+                    return
+                self._thumbs.clear()
+                self.refresh_table()
         start_dir = self.settings["zip_dir"] or str(Path.home() / "Downloads")
         dest, _ = QFileDialog.getSaveFileName(self, "Simpan ZIP",
                                               str(Path(start_dir) / f"{self.pkg.name}.zip"),
@@ -2054,8 +2335,11 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("ZIP berhasil dibuat")
         box.setText(f"{res.path}\n\n{res.total} gambar: {detail}"
-                    + ("\n📄 soal.json (semua kategori) + PROMPT.txt ikut di dalam ZIP" if self.chk_figural.isChecked() else "")
-                    + (f"\n🖼 {res.figural} soal bergambar (gambar ada di soal.json & figural/)" if res.figural else "")
+                    + ("\n📄 PROMPT.txt + daftar.json ikut di dalam ZIP — kirim ZIP + isi PROMPT.txt ke ChatGPT"
+                       if self.chk_figural.isChecked() else "")
+                    + (f"\n🖼 {res.figural} soal bergambar → gambar/" if res.figural else "")
+                    + (f"\n⚠ {res.manual_pending} soal perlu dipotong manual (belum masuk gambar/)"
+                       if res.manual_pending else "")
                     + (f"\n{res.skipped_unassigned} gambar tanpa nomor dilewati." if res.skipped_unassigned else ""))
         b_open = box.addButton("Buka Folder", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Ok)
@@ -2207,37 +2491,8 @@ class MainWindow(QMainWindow):
         self.close()
         QApplication.instance().quit()
 
-    def merge_json(self):
-        """Tanam gambar soal bergambar ke JSON hasil AI -> <nama>-lengkap.json."""
-        from .merge import images_from_manifest, merge, parse_ai_json, report_text
-        src, _ = QFileDialog.getOpenFileName(self, "Pilih JSON hasil AI",
-                                             self.settings["zip_dir"] or str(Path.home() / "Downloads"),
-                                             "JSON (*.json *.txt)")
-        if not src:
-            return
-        try:
-            ai = parse_ai_json(Path(src).read_text(encoding="utf-8-sig"))
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                images = self.pkg.figure_images()
-            finally:
-                QApplication.restoreOverrideCursor()
-            manifest = Path(src).with_name("soal.json")      # soal.json di folder yang sama (bila ada)
-            if manifest.exists():
-                for k, v in images_from_manifest(json.loads(manifest.read_text(encoding="utf-8"))).items():
-                    images.setdefault(k, v)
-            merged, rep = merge(ai, images)
-        except (ValueError, OSError) as exc:
-            return self.error(f"Gagal membaca JSON: {exc}")
-        default = str(Path(src).with_name(Path(src).stem + "-lengkap.json"))
-        dest, _ = QFileDialog.getSaveFileName(self, "Simpan JSON lengkap", default, "JSON (*.json)")
-        if not dest:
-            return
-        Path(dest).write_text(json.dumps(merged, ensure_ascii=False, indent=1), encoding="utf-8")
-        text = report_text(rep)
-        self.set_banner(f"✔ JSON lengkap disimpan: {Path(dest).name} — {rep['gambar']} gambar ditanam", "ok")
-        self.log_event(f"Gabung gambar: {dest} — {text}", "ok")
-        QMessageBox.information(self, "Gabungkan Gambar", f"{dest}\n\n{text}")
+    def open_import_dialog(self):
+        ImportDialog(self).exec()
 
     def closeEvent(self, e):
         if self.auto_running:

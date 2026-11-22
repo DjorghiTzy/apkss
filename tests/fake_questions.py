@@ -77,3 +77,85 @@ def make_question(seed=1, fig_soal=False, fig_opsi=False, fig_pembahasan=False):
         y += 110
     y = text_lines(d, 24, y + 10, 4, rnd)
     return img.crop((0, 0, W, y + 40)), truth
+
+
+# ---------------------------------------------------------------- tangkapan mirip Privat Alfaiz
+GRAY, RED, GREEN = (241, 241, 241), (183, 28, 28), (46, 160, 67)
+
+
+def _figure_panel(d, x, y, w, h, seed):
+    """Panel figural: kotak-kotak bergaris hitam berisi bangun (Analogi/Serial Figural)."""
+    rnd = random.Random(seed)
+    n = 4
+    cw = w // n
+    for i in range(n):
+        bx = x + i * cw
+        d.rectangle([bx + 4, y, bx + cw - 4, y + h], outline="black", width=2)
+        cx, cy, r = bx + cw // 2, y + h // 2, min(cw, h) // 3
+        k = rnd.randint(0, 2)
+        if k == 0:
+            d.polygon([(cx, cy - r), (cx - r, cy + r), (cx + r, cy + r)], outline="black", width=2)
+        elif k == 1:
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], outline="black", width=2)
+        else:
+            d.rectangle([cx - r // 2, cy - r // 2, cx + r // 2, cy + r // 2], fill="black")
+
+
+def make_alfaiz_question(seed=1, kind="text", header=True):
+    """kind: text | figural | opsi (pilihan berupa gambar) | table."""
+    rnd = random.Random(seed)
+    W = 790
+    img = Image.new("RGB", (W, 2000), "white")
+    d = ImageDraw.Draw(img)
+    y = 0
+    if header:
+        d.rectangle([0, 0, W, 56], fill=(139, 0, 0))                  # header situs
+        d.rectangle([40, 8, 132, 47], fill=(30, 30, 30))               # logo AL FAIZ 92×39
+        d.text((52, 20), "AL FAIZ", fill="white")
+        d.text((300, 22), "Beranda   Mulai Belajar   Paket Belajar Saya", fill="white")
+        y = 70
+        d.text((20, y), "< TRY OUT SKD CASN 2026 - PART 39", fill=(139, 0, 0))
+        y += 30
+    d.text((24, y + 8), f"Soal Nomor {seed + 30} (PG)", fill="black")
+    d.rectangle([W - 110, y + 4, W - 40, y + 26], fill=(26, 128, 76))     # tombol "Tampilkan"
+    d.text((W - 102, y + 9), "Tampilkan", fill="white")
+    y += 44
+    y = text_lines(d, 24, y, 2 + rnd.randint(0, 2), rnd)
+    truth = None
+    if kind == "figural":
+        y += 10
+        _figure_panel(d, 40, y, 520, 130, seed)
+        truth = (40, y, 520, 130)
+        y += 150
+    elif kind == "table":                                              # tabel bergaris abu muda
+        y += 8
+        for i in range(3):
+            d.line([24, y + i * 26, 500, y + i * 26], fill=(210, 210, 210))
+        d.text((30, y + 6), "Kuantitas P        Kuantitas Q", fill="black")
+        d.text((30, y + 32), "2/3 dari 90         65", fill="black")
+        y += 70
+    y += 12
+    colors = [GRAY, RED, GRAY, GRAY, GREEN]
+    for i, col in enumerate(colors):
+        d.rounded_rectangle([24, y, W - 24, y + 40], radius=10, fill=col)
+        tc = "black" if col == GRAY else "white"
+        d.text((40, y + 14), "ABCDE"[i], fill=tc)
+        if kind == "opsi":
+            d.rectangle([70, y + 4, 70 + 150, y + 36], fill="white", outline="black", width=2)
+            _figure_panel(d, 74, y + 8, 140, 24, seed * 10 + i)
+        else:
+            d.text((64, y + 14), "pilihan jawaban " + "y" * rnd.randint(5, 40), fill=tc)
+        y += 52
+    y += 30
+    d.text((24, y), f"Pembahasan Nomor {seed + 30}", fill="black")
+    d.text((24, y + 24), "Jawaban kamu : B", fill="black")
+    d.rectangle([130, y + 22, 160, y + 36], fill=(220, 53, 69))          # badge "Salah"
+    d.rounded_rectangle([24, y + 50, W - 24, y + 80], radius=8, outline=(240, 200, 210))
+    d.text((350, y + 59), "Pembahasan Soal", fill=(139, 0, 0))
+    y = text_lines(d, 24, y + 96, 6, rnd)
+    d.text((24, y + 8), "Jawaban: E.", fill="black")
+    y += 40
+    d.rectangle([24, y, 24 + 155, y + 48], fill=(220, 53, 69))          # "Sebelumnya"
+    d.rectangle([W - 24 - 155, y, W - 24, y + 48], fill=(220, 53, 69))  # "Selanjutnya" 155×48
+    d.text((W - 150, y + 18), "Selanjutnya", fill="white")
+    return img.crop((0, 0, W, y + 70)), truth

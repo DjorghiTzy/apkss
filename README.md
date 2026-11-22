@@ -169,57 +169,39 @@ Paket-01.zip
 Hanya gambar yang punya kategori & nomor yang dimasukkan. ZIP ditulis ke file sementara, diverifikasi
 (CRC + daftar isi), baru disimpan, jadi tidak pernah ada ZIP setengah jadi.
 
-## Soal bergambar (figural)
+## Ekspor untuk SKD Intelligence
 
-Setiap screenshot diperiksa otomatis (tanpa OCR/AI, murni bentuk piksel). Soal yang berisi
-gambar — bangun, pola, grafik, tabel — ditandai 🖼 di kolom **Gambar**, dan kotak ungu di
-preview menunjukkan gambar yang ditemukan. Salah deteksi bisa dikoreksi lewat tombol
-**🖼 Gambar ▾** (deteksi ulang / tandai bukan soal bergambar).
-
-Dengan **Sertakan soal.json + PROMPT** tercentang (bawaan), ZIP berisi file tambahan; folder
-TWK/TIU/TKP tidak berubah:
+### 1. BUAT ZIP (untuk ChatGPT)
 
 ```
 Paket-01.zip
-├── TWK/ TIU/ TKP/             screenshot utuh per soal (seperti biasa)
-├── soal.json                  SEMUA soal (TWK + TIU + TKP) dalam satu file
-├── PROMPT.txt                 satu prompt untuk mengubah semua soal sekaligus menjadi JSON
-└── figural/TIU-012/1.png …    potongan gambar soal bergambar
+├─ PROMPT.txt        prompt untuk ChatGPT, terisi otomatis (jumlah soal, daftar soal bergambar, paket)
+├─ daftar.json       {"paket", "bergambar": ["TIU-027", …], "screenshot": [{id, kategori, nomor, file}]}
+├─ TWK/TWK-001.png … TIU/TIU-001.png … TKP/TKP-045.png   (nomor PER KATEGORI, 3 digit)
+└─ gambar/TIU-027.png …                                  (HANYA soal yang benar-benar bergambar)
 ```
 
-`soal.json`:
+Tanpa base64 di file mana pun. `soal.json` sengaja tidak ada — nama itu untuk hasil ChatGPT.
 
-```json
-{
-  "versi": 2, "paket": "Paket-01",
-  "jumlah": {"TWK": 30, "TIU": 35, "TKP": 45, "total": 110, "bergambar": 4},
-  "soal": [
-    {"urutan": 1, "id": "TWK-001", "kategori": "TWK", "nomor": 1, "file": "TWK/TWK-001.png",
-     "lebar": 790, "tinggi": 1840, "bergambar": false},
-    {"urutan": 42, "id": "TIU-012", "kategori": "TIU", "nomor": 12, "file": "TIU/TIU-012.png",
-     "bergambar": true,
-     "gambar": [{"id": "TIU-012-1", "bagian": "soal", "file": "figural/TIU-012/1.png",
-                 "kotak": {"x": 24, "y": 104, "w": 332, "h": 92},
-                 "data": "data:image/png;base64,iVBORw0KGgo..."}]}
-  ]
-}
-```
+**Potong gambar soal (otomatis, tanpa OCR):**
+1. cari baris jawaban pertama (pita ±40 px, ≥ 30% lebar, abu muda / hijau / merah);
+2. cari awal gambar: garis lurus gelap ≥ 45 px di bawah 8% teratas (logo, tombol, teks tidak memenuhi);
+3. potong dari awal gambar sampai 10 px di atas baris jawaban, pangkas ke tinta gelap + 12 px;
+4. disimpan hanya bila ≥ 300×100 px dan tanpa piksel hijau/merah (kunci tidak bocor).
 
-`bagian` = `soal`, `opsi A`…`opsi E`, atau `pembahasan`.
+Gambar di dalam pilihan jawaban ditandai **✂ manual**. Sebelum ekspor muncul **pratinjau semua
+potongan** dengan tombol **Buang** dan **Potong Ulang** (kotak bisa digeser / digambar ulang).
+Kolom *Gambar*: 🖼 = masuk `gambar/`, ✂ manual = perlu dipotong, — = bukan soal bergambar.
 
-### Dari ZIP ke satu JSON lengkap dengan gambar
+### 2. Kirim ke ChatGPT
+Unggah `Paket-01.zip` dan tempel isi `PROMPT.txt`. Hasilnya `soal.json` (semua TWK, TIU, TKP).
 
-1. Kirim ZIP + isi `PROMPT.txt` sekali ke AI → AI menghasilkan `Paket-01.json` berisi SEMUA soal.
-   AI sengaja tidak menyalin gambar (base64 terlalu panjang & rawan rusak); ia menulis penanda
-   `[GAMBAR:TIU-027-2]` di posisi gambar dan daftar id di kolom `gambar`.
-2. Tanam gambar — pilih salah satu:
-   - buka **`gabung-gambar.html`** (ada di ZIP, offline, bisa di HP) → pilih `Paket-01.json` →
-     **Unduh Paket-01-lengkap.json**; atau
-   - di aplikasi: **🖼 Gabungkan Gambar ke JSON…** → pilih `Paket-01.json`.
-3. Hasil `Paket-01-lengkap.json`: setiap soal bergambar punya
-   `"gambar": [{"id": "TIU-027-2", "bagian": "opsi A", "data": "data:image/png;base64,..."}]`,
-   penanda di teks tetap ada untuk menunjukkan posisinya. Gambar yang lupa ditandai AI tetap
-   dimasukkan ke soalnya, dan laporan menyebut penanda yang id-nya salah.
+### 3. 📦 Buat ZIP siap impor
+Tempel / pilih `soal.json` → aplikasi memeriksa (paket, kategori, nomor 1–30/35/45 tanpa ganda,
+subtopik, pilihan A–E, kunci TWK/TIU, skor 1–5 TKP, rujukan gambar, jumlah soal) dan menampilkan
+masalah per nomor (tetap boleh lanjut), membersihkan `[gambar]`/`[GAMBAR:…]`, mengganti
+`opsi`→`pilihan` dan `jawaban`→`kunci`, lalu membuat **Paket-01-siap-impor.zip** berisi HANYA
+`soal.json` + `gambar/`. Unggah di **SKD Intelligence → Impor Soal → Unggah ZIP**.
 
 ## Catatan folder
 

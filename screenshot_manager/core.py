@@ -245,9 +245,12 @@ class Item:
     height: int = 0
     parts: int = 1
     part_fps: list = field(default_factory=list)
-    figures: list = field(default_factory=list)   # [{x, y, w, h, bagian}] gambar di dalam soal
+    figures: list = field(default_factory=list)   # [{x, y, w, h}] potongan gambar soal (0 atau 1)
     figures_checked: bool = False                 # False = perlu dideteksi ulang
     figures_off: bool = False                     # ditandai pengguna: bukan soal bergambar
+    figure_manual: bool = False                   # gambar ada di pilihan jawaban: perlu dipotong manual
+    figure_hint: Optional[dict] = None            # saran kotak awal untuk potong manual
+    figure_by_hand: bool = False                  # kotak dipotong manual oleh pengguna
 
     @property
     def assigned(self) -> bool:
@@ -294,7 +297,8 @@ class ZipResult:
     counts: dict[str, int]
     skipped_unassigned: int
     total: int
-    figural: int = 0          # jumlah soal bergambar yang diberi JSON
+    figural: int = 0          # jumlah soal bergambar (file di gambar/)
+    manual_pending: int = 0   # soal yang perlu dipotong manual tapi belum
 
 
 @dataclass
@@ -634,62 +638,72 @@ class Package:
 
     # ---------- export
     # ---------- soal bergambar (figural)
+    def apply_figure_result(self, item: Item, result) -> None:
+        """Simpan hasil figures.detect_question_figure ke item (kecuali dipotong manual/ditolak)."""
+        if item.figures_off or item.figure_by_hand:
+            item.figures_checked = True
+            return
+        item.figures = [dict(result.box)] if result.status == "ok" else []
+        item.figure_manual = result.status == "manual"
+        item.figure_hint = dict(result.box) if (result.status == "manual" and result.box) else None
+        item.figures_checked = True
+
     def update_figures(self, item_id: str, force: bool = False) -> list:
-        """Deteksi gambar di screenshot soal (bila berubah sejak deteksi terakhir)."""
+        """Deteksi potongan gambar soal (bila berubah sejak deteksi terakhir)."""
         item = self.get(item_id)
         if item.figures_off:
-            item.figures, item.figures_checked = [], True
+            item.figures, item.figure_manual, item.figures_checked = [], False, True
             return []
-        if item.figures_checked and not force:
+        if (item.figures_checked or item.figure_by_hand) and not force:
             return item.figures
-        from .figures import detect_figures
+        from .figures import FigureResult, detect_question_figure
         try:
             with Image.open(self.path_of(item)) as im:
-                item.figures = detect_figures(im)
+                res = detect_question_figure(im)
         except Exception:  # noqa: BLE001 - deteksi gagal tidak boleh menggagalkan alur utama
-            item.figures = []
-        item.figures_checked = True
+            res = FigureResult("none")
+        if force:
+            item.figure_by_hand = False
+        self.apply_figure_result(item, res)
         self.save()
         return item.figures
 
     def set_figural(self, item_id: str, on: bool) -> list:
-        """on=False: tandai bukan soal bergambar; on=True: deteksi ulang."""
+        """on=False: buang (bukan soal bergambar); on=True: deteksi ulang otomatis."""
         item = self.get(item_id)
         item.figures_off = not on
+        item.figure_by_hand = False
         item.figures_checked = False
+        if not on:
+            item.figure_manual = False
         return self.update_figures(item_id)
 
-    def figural_payload(self, item: Item) -> tuple[dict, list[tuple[str, bytes]]]:
-        """JSON (dengan gambar base64) + file PNG per gambar untuk satu soal bergambar."""
-        from .figures import crop_png_bytes, data_uri
-        stem = Path(item.filename).stem
-        files, figs = [], []
-        with Image.open(self.path_of(item)) as im:
-            img = im.convert("RGB")
-            for i, f in enumerate(item.figures, start=1):
-                png = crop_png_bytes(img, f)
-                path = f"figural/{stem}/{i}.png"
-                files.append((path, png))
-                figs.append({"id": i, "bagian": f.get("bagian", "gambar"), "file": path,
-                             "kotak": {k: f[k] for k in ("x", "y", "w", "h")},
-                             "lebar": f["w"], "tinggi": f["h"], "data": data_uri(png)})
-            size = img.size
-        doc = {"versi": 1, "paket": self.name, "kategori": item.category, "nomor": item.number,
-               "id": stem, "file_soal": item.relpath, "lebar_soal": size[0], "tinggi_soal": size[1],
-               "jumlah_gambar": len(figs), "gambar": figs}
-        return doc, files
+    def set_figure_box(self, item_id: str, box: dict) -> None:
+        """Potong manual: kotak gambar dipilih pengguna."""
+        item = self.get(item_id)
+        x, y, w, h = (int(box[k]) for k in ("x", "y", "w", "h"))
+        x, y = max(0, x), max(0, y)
+        w, h = min(w, item.width - x), min(h, item.height - y)
+        if w < 10 or h < 10:
+            raise ManagerError("Kotak gambar terlalu kecil")
+        item.figures = [{"x": x, "y": y, "w": w, "h": h}]
+        item.figures_off, item.figure_manual, item.figure_by_hand, item.figures_checked = False, False, True, True
+        self.save()
 
-    def figure_images(self) -> dict:
-        """{id_soal: [{id, bagian, data}]} untuk semua soal bergambar (dipakai penggabung JSON)."""
-        out = {}
-        for it in self.sorted_items():
-            if it.assigned and self.update_figures(it.id):
-                doc, _ = self.figural_payload(it)
-                out[doc["id"]] = [{"id": f"{doc['id']}-{g['id']}", "bagian": g["bagian"], "data": g["data"]}
-                                  for g in doc["gambar"]]
-        return out
+    def figure_png(self, item: Item) -> bytes:
+        from .figures import crop_png_bytes
+        with Image.open(self.path_of(item)) as im:
+            return crop_png_bytes(im, item.figures[0])
+
+    def figural_items(self) -> list[Item]:
+        """Soal yang benar-benar bergambar (punya potongan), urut kategori & nomor."""
+        return [it for it in self.sorted_items() if it.assigned and self.update_figures(it.id)]
+
+    def display_name(self) -> str:
+        return self.name.replace("-", " ").replace("_", " ")
 
     def export_zip(self, dest: str | os.PathLike, figural: bool = True) -> ZipResult:
+        """ZIP untuk ChatGPT: PROMPT.txt, daftar.json, TWK/TIU/TKP/*.png, gambar/*.png (tanpa base64)."""
         dest = Path(dest)
         if dest.suffix.lower() != ".zip":
             dest = dest.with_suffix(".zip")
@@ -705,49 +719,28 @@ class Package:
         counts: dict[str, int] = {}
         for it in assigned:
             counts[it.category] = counts.get(it.category, 0) + 1
-        fig_items = []
-        if figural:
-            for it in assigned:
-                if self.update_figures(it.id):
-                    fig_items.append(it)
+        fig_items = self.figural_items() if figural else []
+        manual_pending = sum(1 for it in assigned if it.figure_manual and not it.figures)
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".zip", dir=dest.parent)
         os.close(fd)
         try:
             with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                if figural:
+                    zf.writestr("PROMPT.txt", build_prompt(self.display_name(), len(assigned), fig_items))
+                    daftar = {"paket": self.display_name(),
+                              "bergambar": [Path(it.filename).stem for it in fig_items],
+                              "screenshot": [{"id": Path(it.filename).stem, "kategori": it.category,
+                                              "nomor": it.number, "file": it.relpath} for it in assigned]}
+                    zf.writestr("daftar.json", json.dumps(daftar, ensure_ascii=False, indent=1))
+                    names += ["PROMPT.txt", "daftar.json"]
                 for it in assigned:
                     zf.write(self.path_of(it), arcname=it.relpath)
-                if figural:
-                    # satu soal.json untuk SEMUA kategori (TWK, TIU, TKP) + gambar soal figural
-                    docs = {}
-                    for it in fig_items:
-                        doc, files = self.figural_payload(it)
-                        docs[it.id] = doc
-                        for path, png in files:
-                            zf.writestr(path, png)
-                            names.append(path)
-                    soal = []
-                    for urutan, it in enumerate(assigned, start=1):
-                        entry = {"urutan": urutan, "id": Path(it.filename).stem, "kategori": it.category,
-                                 "nomor": it.number, "file": it.relpath, "lebar": it.width, "tinggi": it.height,
-                                 "bergambar": it.id in docs}
-                        if it.id in docs:
-                            entry["gambar"] = [{"id": f"{entry['id']}-{g['id']}", "bagian": g["bagian"],
-                                                "file": g["file"], "kotak": g["kotak"], "data": g["data"]}
-                                               for g in docs[it.id]["gambar"]]
-                        soal.append(entry)
-                    jumlah = {c: n for c, n in counts.items()}
-                    jumlah["total"] = len(assigned)
-                    jumlah["bergambar"] = len(fig_items)
-                    manifest = {"versi": 2, "paket": self.name, "dibuat": _now(), "jumlah": jumlah, "soal": soal}
-                    zf.writestr("soal.json", json.dumps(manifest, ensure_ascii=False, indent=1))
-                    zf.writestr("PROMPT.txt", build_prompt(self.name, jumlah))
-                    names += ["soal.json", "PROMPT.txt"]
-                    if docs:                                   # alat offline: tanam gambar ke JSON hasil AI
-                        from .merge import build_merge_html, images_from_manifest
-                        zf.writestr("gabung-gambar.html", build_merge_html(self.name, images_from_manifest(manifest)))
-                        names.append("gabung-gambar.html")
+                for it in fig_items:
+                    path = f"gambar/{it.filename}"
+                    zf.writestr(path, self.figure_png(it))
+                    names.append(path)
             with zipfile.ZipFile(tmp) as zf:  # verifikasi hasil
                 bad = zf.testzip()
                 if bad is not None:
@@ -759,57 +752,63 @@ class Package:
             Path(tmp).unlink(missing_ok=True)
             raise
         return ZipResult(dest, counts, sum(1 for i in self.items if not i.assigned), len(assigned),
-                         len(fig_items))
+                         len(fig_items), manual_pending)
 
 
-def build_prompt(package: str, jumlah: dict) -> str:
-    """Satu prompt untuk mengubah SEMUA soal di ZIP (TWK, TIU, TKP sekaligus) menjadi satu JSON."""
-    rinci = ", ".join(f"{c} {n}" for c, n in jumlah.items() if c not in ("total", "bergambar"))
-    return f"""Lampiran: ZIP {package} berisi screenshot soal SKD lengkap dengan pembahasannya.
-- Folder TWK/, TIU/, TKP/: satu PNG per soal (TWK-001.png, ...). Total {jumlah['total']} soal ({rinci}).
-- soal.json: daftar SEMUA soal berurutan (id, kategori, nomor, file) + gambar untuk soal bergambar.
-- figural/: potongan gambar soal bergambar ({jumlah['bergambar']} soal).
+PROMPT_TEMPLATE = """Kamu bertugas menyalin soal SKD CPNS dari screenshot di ZIP ini menjadi SATU file soal.json. Tugasmu MENYALIN, bukan mengarang. Kamu TIDAK perlu membuat atau memotong gambar, karena gambar sudah tersedia di folder gambar/.
 
-TUGAS: ubah SEMUA {jumlah['total']} soal — TWK, TIU, dan TKP SEKALIGUS — menjadi SATU JSON.
-Jangan dipisah per kategori, jangan berhenti di tengah, jangan meringkas, jangan melewatkan soal.
-Kerjakan berurutan mengikuti soal.json["soal"] dari urutan 1 sampai {jumlah['total']}.
+CARA KERJA
+1. Pakai screenshot di folder TWK/, TIU/, TKP/. Abaikan daftar.json, PROMPT.txt, dan folder gambar/.
+2. Kategori dan nomor dari nama file: TIU/TIU-027.png = TIU nomor 27, walaupun di gambar tertulis "Soal Nomor 57".
+3. LIHAT setiap screenshot langsung. Jangan memakai OCR otomatis sebagai sumber akhir.
+4. Kerjakan SEMUA {{JUMLAH}} soal berurutan (TWK, TIU, TKP), jangan berhenti di tengah, jangan meringkas, jangan melewatkan soal.
 
-Untuk setiap entri soal.json["soal"], buka file screenshot-nya ("file") lalu isi:
-{{
-  "id": "<id dari soal.json>",
-  "kategori": "TWK" | "TIU" | "TKP",
-  "nomor": <nomor>,
-  "pertanyaan": "<teks soal lengkap>",
-  "opsi": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}},
-  "jawaban": "<huruf kunci jawaban, khusus TWK & TIU>",
-  "skor": {{"A": 0, "B": 0, "C": 0, "D": 0, "E": 0}},
-  "pembahasan": "<teks pembahasan lengkap>",
-  "gambar": ["<id gambar dari soal.json>", ...]
-}}
+ATURAN MENYALIN
+- Salin teks soal, pilihan A–E, dan pembahasan persis seperti di gambar. Jangan memperbaiki atau menambah kata.
+- Bagian yang tidak terbaca: null dan jelaskan di "catatan". Jangan menebak.
+- Pembahasan HANYA dari gambar. Jika tidak ada, null.
+- Abaikan logo, menu, judul "TRY OUT ...", tombol "Tampilkan", "Sebelumnya", "Selanjutnya", "Pembahasan Soal", dan baris "Jawaban kamu".
+- Pertahankan angka dan simbol (2/3, x², √49, ×, ÷, ≥).
+- Tabel (misalnya Perbandingan Kuantitatif atau data) ditulis sebagai tabel teks dengan baris dipisah \\n:
+  "| Kuantitas P | Kuantitas Q |\\n|---|---|\\n| 2/3 dari 90 | 65 |"
 
-ATURAN:
-1. Salin teks PERSIS seperti di screenshot (tanpa parafrase), termasuk angka, satuan, dan tanda baca.
-2. Kunci jawaban TWK/TIU diambil dari pembahasan ("Jawaban: X") atau opsi berwarna hijau.
-   Opsi berwarna merah adalah jawaban peserta yang salah, BUKAN kunci.
-3. TKP tidak punya satu kunci: isi "skor" tiap opsi (1–5) sesuai pembahasan; "jawaban" = opsi skor 5.
-   Untuk TWK/TIU isi "skor" dengan 5 untuk kunci dan 0 untuk lainnya.
-4. Soal bergambar ("bergambar": true di soal.json): tulis penanda [GAMBAR:<id gambar>] PERSIS di posisi
-   gambar itu pada "pertanyaan", "opsi" X, atau "pembahasan" (lihat "bagian": soal / opsi A–E / pembahasan),
-   dan cantumkan SEMUA id gambar soal itu di "gambar" (contoh: "gambar": ["TIU-027-1", "TIU-027-2"]).
-   Setiap id gambar di soal.json harus muncul tepat satu kali. Opsi yang isinya hanya gambar ditulis
-   "[GAMBAR:TIU-027-3]".
-   JANGAN menyalin data base64 — gambar ditanam otomatis pada langkah terakhir (lihat bawah).
-5. Soal tanpa gambar: "gambar": [].
-6. Jika ada bagian yang benar-benar tidak terbaca, tetap isi yang terbaca dan tambahkan "catatan".
+KUNCI
+- TWK/TIU: ambil dari tulisan "Jawaban: X" di pembahasan, atau pilihan berlatar HIJAU. Pilihan berlatar MERAH BUKAN kunci. Tidak pasti → null + catatan.
+- TKP: "kunci" null, "skor" berisi bobot A–E dari pembahasan, contoh {"A":3,"B":5,"C":2,"D":1,"E":4}. TWK/TIU: "skor" null.
 
-KELUARAN: hanya satu JSON valid, tanpa teks lain, sebagai file {package}.json:
-{{"paket": "{package}", "jumlah": {jumlah['total']}, "soal": [ ...{jumlah['total']} objek... ]}}
-""" + ("" if not jumlah.get("bergambar") else f"""
-LANGKAH TERAKHIR (oleh pengguna, bukan AI) — menanam gambar:
-Buka gabung-gambar.html (ada di ZIP ini) di browser, pilih {package}.json hasil AI, lalu unduh
-{package}-lengkap.json. Setiap penanda [GAMBAR:...] mendapat gambar aslinya (base64) di kolom "gambar"
-soal tersebut. Bisa juga lewat aplikasi Screenshot Manager → "Gabungkan Gambar ke JSON…".
-""")
+SUBTOPIK (tulis persis sama)
+- TWK: Nasionalisme, Integritas, Bela Negara, Pilar Negara, Bahasa Indonesia
+- TIU: Analogi Verbal, Silogisme, Analitis, Berhitung, Deret Angka, Perbandingan Kuantitatif, Soal Cerita, Analogi Figural, Ketidaksamaan Figural, Serial Figural
+- TKP: Pelayanan Publik, Jejaring Kerja, Sosial Budaya, Teknologi Informasi dan Komunikasi, Profesionalisme, Anti Radikalisme
+
+SOAL BERGAMBAR
+- Hanya soal ini yang bergambar: {{DAFTAR_BERGAMBAR}}.
+- Untuk soal tersebut: "bergambar": true, "gambar": "<path di atas>", "pertanyaan" berisi teksnya saja (misalnya "Perhatikan gambar berikut!"), dan pilihan yang berupa gambar diisi "".
+- SEMUA soal lain: "bergambar": false, "gambar": null.
+- Jangan menulis [gambar] atau base64.
+
+FORMAT soal.json
+{
+  "paket": "{{PAKET}}",
+  "soal": [
+    {"kategori": "TWK", "nomor": 1, "subtopik": "Nasionalisme",
+     "pertanyaan": "...", "pilihan": {"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."},
+     "kunci": "C", "skor": null, "bergambar": false, "gambar": null,
+     "pembahasan": "...", "catatan": null}
+  ]
+}
+
+PENGIRIMAN
+Simpan sebagai file soal.json dan berikan link unduhnya. Jika tidak bisa membuat file, tulis JSON-nya dalam satu blok kode. Jangan menulis penjelasan lain.
+"""
+
+
+def build_prompt(paket: str, jumlah: int, figural_items: list) -> str:
+    """PROMPT.txt untuk ChatGPT dengan {{JUMLAH}}, {{DAFTAR_BERGAMBAR}}, {{PAKET}} terisi."""
+    daftar = ", ".join(f"{it.category} {it.number} (gambar/{it.filename})" for it in figural_items)
+    return (PROMPT_TEMPLATE.replace("{{JUMLAH}}", str(jumlah))
+            .replace("{{DAFTAR_BERGAMBAR}}", daftar or "tidak ada")
+            .replace("{{PAKET}}", paket))
 
 
 def list_packages(workspace_root: str | os.PathLike) -> list[str]:
