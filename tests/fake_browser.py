@@ -147,14 +147,20 @@ class FakeAlfaiz:
 
     def __init__(self, counts, height_of=lambda cat, n: 900 + (n * 173) % 1500, start_cat="TWK",
                  px_per_notch=53, dy_extra=None, load_s=0.0, anim_s=0.0, full_text=False,
-                 card_border=False, sidebar_border=True):
+                 card_border=False, sidebar_border=True, page_maker=None, black_after_nav=None,
+                 scroll_lag=None, blink=False):
         self.counts = counts
+        self.black_after_nav = black_after_nav or {}   # (kat, n) -> detik layar hitam setelah dibuka
+        self.scroll_lag = scroll_lag or {}             # (kat, n) -> detik browser telat merespons scroll
+        self.blink = blink                             # kursor berkedip di area soal
+        self._black_until = 0.0
+        self._pending = None                           # (waktu, scroll_y) scroll yang tertunda
         self.card_border, self.sidebar_border = card_border, sidebar_border
         self.load_s, self.anim_s = load_s, anim_s          # latensi meniru browser asli
         self._load_until = 0.0
         self._anim = None                                  # (t0, dari_y, ke_y)
         self.dy_extra = dy_extra or {}          # grid kategori tertentu sedikit lebih renggang
-        mk = make_full_page if full_text else make_page
+        mk = page_maker or (make_full_page if full_text else make_page)
         self.pages = {(c, n): mk(1000 * (i + 1) + n, height_of(c, n))
                       for i, c in enumerate(self.CATS) if c in counts for n in range(1, counts[c] + 1)}
         self.cat, self.n, self.scroll_y, self.open = start_cat, 1, 0, False
@@ -173,6 +179,9 @@ class FakeAlfaiz:
         x, y, w, h = self.CONTENT
         import time as _t
         now = _t.monotonic()
+        if self._pending and now >= self._pending[0]:      # scroll tertunda akhirnya dijalankan
+            self.scroll_y = self._pending[1]
+            self._pending = None
         sy = self.scroll_y
         if self._anim is not None:                         # animasi scroll halus
             t0, a, b_ = self._anim
@@ -186,6 +195,10 @@ class FakeAlfaiz:
             page = self.pages[(self.cat, self.n)]
         part = page.crop((0, sy, w, min(page.height, sy + h)))
         scr.paste(part, (x, y))
+        if now < self._black_until:                                    # layar hitam sesaat
+            d.rectangle([x, y, x + w - 1, y + h - 1], fill="black")
+        if self.blink and int(now / 0.04) % 2:                         # kursor berkedip
+            d.rectangle([x + w - 40, y + 20, x + w - 38, y + 34], fill="black")
         d.rectangle([0, 0, W, 60], fill="#202124")                     # toolbar browser
         d.text((300, 25), "casn.privatalfaiz.id/#!/ujian/pembahasan", fill="#ddd")
         d.rectangle([0, 60, W, 99], fill="#8b0000")                    # header situs menempel
@@ -249,12 +262,17 @@ class FakeAlfaiz:
                 self._prev_page = (self.cat, self.n)
                 self._load_until = _t.monotonic() + self.load_s
                 self.n, self.scroll_y = k, 0
+                self._black_until = _t.monotonic() + self.black_after_nav.get((self.cat, k), 0)
 
     def scroll(self, x, y, notches):
         import time as _t
         page = self.pages[(self.cat, self.n)]
         max_y = max(0, page.height - self.CONTENT[3])
         new = min(max_y, max(0, self.scroll_y - notches * self.px))
+        lag = self.scroll_lag.get((self.cat, self.n), 0)
+        if lag and notches < 0 and new != self.scroll_y:              # browser telat merespons
+            self._pending = (_t.monotonic() + lag, new)
+            return
         if self.anim_s and new != self.scroll_y:
             self._anim = (_t.monotonic(), self.scroll_y, new)
         self.scroll_y = new

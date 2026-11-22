@@ -159,3 +159,18 @@ def make_alfaiz_question(seed=1, kind="text", header=True):
     d.rectangle([W - 24 - 155, y, W - 24, y + 48], fill=(220, 53, 69))  # "Selanjutnya" 155×48
     d.text((W - 150, y + 18), "Selanjutnya", fill="white")
     return img.crop((0, 0, W, y + 70)), truth
+
+
+def make_long_question(q: int, height: int) -> Image.Image:
+    """Soal panjang: teks soal ±560 px, lalu pilihan A–E, lalu pembahasan (E jatuh di bagian ke-2)."""
+    rnd = random.Random(q)
+    img = Image.new("RGB", (760, max(height, 1500)), "white")
+    d = ImageDraw.Draw(img)
+    d.text((20, 10), f"Soal Nomor {q}", fill="black")
+    y = text_lines(d, 20, 40, 32, rnd)
+    for i, col in enumerate([GRAY, RED, GRAY, GRAY, GREEN]):
+        d.rounded_rectangle([20, y, 740, y + 40], radius=8, fill=col)
+        d.text((34, y + 14), "ABCDE"[i] + f"  pilihan {q}-{i}", fill="black" if col == GRAY else "white")
+        y += 52
+    y = text_lines(d, 20, y + 30, 25, rnd)
+    return img.crop((0, 0, 760, y + 20))

@@ -131,7 +131,7 @@ class RunConfig:
     wait_load: float = 1.5          # batas tunggu halaman berganti (bukan jeda tetap)
     max_parts: int = 30
     notches: Optional[int] = None   # None = kalibrasi otomatis
-    stable_timeout: float = 6.0     # batas tunggu layar diam
+    stable_timeout: float = 3.0     # batas tunggu layar diam
     stable_interval: float = 0.015  # jeda antar pemeriksaan layar
     step_ratio: float = 0.85        # langkah scroll ~85% tinggi area (sisanya tumpang tindih)
     settle_scroll: float = 0.045    # layar dianggap diam setelah scroll bila tak berubah selama ini
@@ -238,6 +238,24 @@ class AutoCapture:
                 self._region_ok = False
         return self._crop(self.d.grab())
 
+    def _same(self, a: Optional[bytes], b: Optional[bytes]) -> bool:
+        """Dua frame dianggap sama bila berbeda ≤ 0,1% piksel (kursor berkedip, ikon loading kecil)."""
+        if a is None or b is None:
+            return a is b
+        if a == b:
+            return True
+        if len(a) != len(b):
+            return False
+        import numpy as np
+        x = np.frombuffer(a, dtype=np.uint8)
+        y = np.frombuffer(b, dtype=np.uint8)
+        return int(np.count_nonzero(x != y)) <= max(30, len(a) // 1000)
+
+    @staticmethod
+    def _blank(img: Image.Image) -> bool:
+        from .quality import is_blank
+        return is_blank(img)
+
     def _wait_change(self, before: Optional[bytes], first_timeout: float, settle: float,
                      need_same: int = 2) -> Optional[Image.Image]:
         """Tunggu sampai area soal BERUBAH dari `before` lalu DIAM (need_same tangkapan sama berturut-turut).
@@ -255,14 +273,14 @@ class AutoCapture:
             b = cur.tobytes()
             now = time.monotonic()
             if not changed:
-                if b != before:
+                if not self._same(b, before):
                     self._last_latency = now - t0
                     changed, last, last_img, since = True, b, cur, now
                 elif now - t0 > first_timeout:
                     return None
             else:
-                if b == last:
-                    if now - since >= quiet:              # tidak berubah selama `quiet` detik = diam
+                if self._same(b, last):
+                    if now - since >= quiet and not self._blank(last_img):   # diam & bukan layar kosong
                         return last_img
                 else:
                     last, last_img, since = b, cur, now
@@ -280,12 +298,12 @@ class AutoCapture:
             cur = self._grab_area()
             b = cur.tobytes()
             now = time.monotonic()
-            if b in exclude:
+            if any(self._same(b, e) for e in exclude):
                 last = None
                 if now - t0 > timeout:
                     return None
-            elif b == last:
-                if now - since >= quiet:
+            elif self._same(b, last):
+                if now - since >= quiet and not self._blank(last_img):
                     return last_img
             else:
                 last, last_img, since = b, cur, now
@@ -310,7 +328,7 @@ class AutoCapture:
         """Tunggu hasil scroll. Begitu pergeseran tepat `expected` piksel (posisi akhir langkah penuh),
         foto langsung dipakai tanpa menunggu layar diam. None = halaman tidak bergeser."""
         if not expected:
-            return self._wait_change(last.tobytes(), self._no_move_timeout(), self.cfg.stable_timeout)
+            return self._wait_change(last.tobytes(), max(0.3, self._no_move_timeout()), self.cfg.stable_timeout)
         h = self.area_h
         before = last.tobytes()
         row = len(before) // h
@@ -328,14 +346,14 @@ class AutoCapture:
                     self._last_latency = now - t0
                 return cur
             if not changed:
-                if b != before:
+                if not self._same(b, before):
                     self._last_latency = now - t0
                     changed, prev, prev_img, since = True, b, cur, now
-                elif now - t0 > timeout:
+                elif now - t0 > max(timeout, 0.3):        # konfirmasi: browser bisa telat merespons scroll
                     return None
             else:
-                if b == prev:
-                    if now - since >= self.cfg.settle_scroll:
+                if self._same(b, prev):
+                    if now - since >= max(0.12, self.cfg.settle_scroll):
                         return prev_img                   # berhenti lebih pendek: dasar halaman
                 else:
                     prev, prev_img, since = b, cur, now
@@ -669,6 +687,48 @@ class AutoCapture:
         return ok
 
     # ------------------------------------------------------------ main
+    def _quality_gate(self, parts, cat, local, g, name, rep):
+        """Tolak tangkapan kosong/hitam dan soal yang pilihan jawabannya tidak lengkap (< 5 baris)."""
+        from .quality import is_blank, option_rows
+        careful = False
+        for attempt in range(3):
+            blank = any(is_blank(p) for p in parts)
+            rows = option_rows(stitch(parts)[0]) if not blank else 0
+            if not blank and (rows >= 5 or rows == 0):    # 0 = bukan halaman berpilihan: tak dinilai
+                return parts
+            if attempt == 2:
+                break
+            why = "layar kosong/hitam" if blank else f"hanya {rows} baris pilihan terlihat"
+            self.progress(f"  {name}: {why} — diambil ulang ({attempt + 1}/2)")
+            if blank:                                       # buka ulang soalnya
+                self._prev_first = None
+                self._at_top = False
+                self._scroll_top()
+                first = self._stable()
+                if is_blank(first):
+                    self._shown_cat = None if attempt else self._shown_cat
+                    first = self._open_question(cat, local, g, False)
+            else:                                           # mungkin terpotong: ulangi lebih hati-hati
+                careful = True
+                self._at_top = False
+                self._scroll_top()
+                first = self._stable()
+            if careful:
+                saved = (self.notches, self.step_px)
+                self.notches = max(1, int((self.notches or 4) * 0.6))
+                self.step_px = 0
+                parts = self._capture_question(first, name, rep)
+                self.notches, self.step_px = saved
+            else:
+                parts = self._capture_question(first, name, rep)
+        if any(is_blank(p) for p in parts):
+            rep.problems.append((name, "screenshot kosong/hitam — periksa & ambil ulang"))
+        else:
+            rows = option_rows(stitch(parts)[0])
+            if 0 < rows < 5:
+                rep.problems.append((name, f"hanya {rows} baris pilihan terlihat (A–E tidak lengkap?) — periksa"))
+        return parts
+
     def run(self) -> Report:
         rep = Report()
         t_start = time.monotonic()
@@ -713,6 +773,7 @@ class AutoCapture:
                     self._at_top = False
                     self._scroll_top()
                     parts = self._capture_question(self._stable(), name, rep)
+                parts = self._quality_gate(parts, cat, local, g, name, rep)
                 t_scrolled = time.monotonic()
                 self._at_top = len(parts) == 1
                 fp = image_fingerprint(parts[0])

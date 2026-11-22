@@ -10,6 +10,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+from PIL import Image
 from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPen,
                            QKeySequence, QPixmap)
@@ -1425,6 +1426,13 @@ class MainWindow(QMainWindow):
             self.waiting_crop_reference = False
             self._open_crop_dialog(path)
             return
+        try:
+            from .quality import is_blank
+            with Image.open(path) as _im:
+                if is_blank(_im):
+                    return self.error(f"{name}: screenshot kosong/hitam — tidak disimpan. Ambil ulang.")
+        except Exception:  # noqa: BLE001
+            pass
         if self.append_target:
             return self._handle_append(path, name, origin)
         crop = self.settings["crop"]

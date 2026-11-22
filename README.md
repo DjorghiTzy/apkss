@@ -66,6 +66,14 @@ Relaunch. Tanpa itu sekitar 1,5 detik per soal. Zoom browser yang lebih kecil (m
 mengurangi jumlah scroll per soal. Aplikasi tidak memakai jeda tetap: foto diambil begitu halaman
 berganti dan diam, jadi tetap akurat walaupun cepat.
 
+**Pengaman ketepatan:** frame kosong/hitam (mis. layar sesaat saat halaman berganti) tidak pernah
+difoto — aplikasi menunggu isinya muncul atau membuka ulang soal. Dasar halaman dikonfirmasi
+dulu (browser yang telat merespons scroll tidak membuat pembahasan terpotong), dan setiap soal
+dicek harus punya 5 baris pilihan jawaban; bila kurang, diambil ulang lebih hati-hati, dan bila
+tetap kurang dicatat di laporan. Animasi kecil di area soal (kursor berkedip, ikon loading) tidak
+membuat aplikasi menunggu sampai batas waktu. Screenshot manual yang kosong/hitam ditolak, dan
+peringatan ekspor menyebut soal yang pilihannya < 5.
+
 Area potong selalu pas di tepi kartu soal. Jika ada tulisan yang menyentuh tepi (tanda terpotong),
 area otomatis diperlebar sampai ruang kosong, soal itu diambil ulang, dan area baru disimpan.
 

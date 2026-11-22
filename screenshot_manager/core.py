@@ -648,6 +648,15 @@ class Package:
             lo, hi = small.getextrema()
             if hi - lo < 12:
                 issues.append(f"{it.filename}: screenshot {'hitam' if hi < 40 else 'kosong'} (tanpa isi)")
+                continue
+            from .quality import option_rows
+            try:
+                with Image.open(self.path_of(it)) as im:
+                    rows = option_rows(im)
+            except Exception:  # noqa: BLE001
+                rows = 5
+            if 0 < rows < 5:
+                issues.append(f"{it.filename}: hanya {rows} pilihan jawaban terlihat (A–E tidak lengkap?)")
         for cat in self.categories:
             nums = sorted(i.number for i in assigned if i.category == cat)
             want = expected.get(cat, max(nums, default=0))

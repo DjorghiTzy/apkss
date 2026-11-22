@@ -148,3 +148,37 @@ def test_every_question_under_one_second_without_smooth_scroll(tmp_path):
     assert len(times) == 24
     print("terlama", max(times), "rata-rata", sum(times) / len(times))
     assert max(times) < 1.0, sorted(times)[-5:]
+
+
+def _check_all(pkg, b, res, counts):
+    off = FakeAlfaiz.CONTENT[0] - res.crop["rect"][0]
+    for cat, n in counts.items():
+        for k in range(1, n + 1):
+            with Image.open(pkg.path_of(pkg.find_slot(cat, k))) as im:
+                got = im.convert("RGB")
+            page = b.page_of(cat, k)
+            wv = min(page.width, got.width - off)
+            assert got.height == page.height, (cat, k, got.size, page.size)
+            assert got.crop((off, 0, off + wv, got.height)).tobytes() == page.crop((0, 0, wv, page.height)).tobytes(), (cat, k)
+
+
+def test_black_screen_lagging_scroll_and_blinking_caret(tmp_path):
+    """Kasus nyata: TIU 4 tertangkap hitam, TIU 18 hanya A–D (scroll telat), area soal berkedip."""
+    from screenshot_manager.quality import option_rows
+    from tests.fake_questions import make_long_question
+    counts = {"TWK": 6, "TIU": 6, "TKP": 6}
+    b = FakeAlfaiz(counts, page_maker=make_long_question, load_s=0.15, anim_s=0.0,
+                   black_after_nav={("TIU", 4): 0.4}, scroll_lag={("TIU", 5): 0.2, ("TKP", 2): 0.25},
+                   blink=False)
+    res = run_autosetup(b, ["TWK", "TIU", "TKP"], wait_load=1.5)
+    b.blink = True                                   # kursor berkedip selama Tangkap Otomatis
+    pkg = Package(tmp_path / "ws", "P")
+    rep = AutoCapture(pkg, Plan(sections=[[c, n] for c, n in counts.items()]),
+                      RunConfig(crop=res.crop, nav=res.nav, wait_load=1.5), b).run()
+    assert rep.aborted is None and rep.captured == 18, rep
+    assert rep.seconds / rep.captured < 2.0, rep.seconds          # kedipan tidak membuat menunggu batas waktu
+    b.blink = False
+    for it in pkg.items:
+        with Image.open(pkg.path_of(it)) as im:
+            assert option_rows(im) == 5, it.filename                 # tidak ada yang hitam / A–D saja
+    assert not [p for p in rep.problems if "hitam" in p[1] or "baris pilihan" in p[1]], rep.problems

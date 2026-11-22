@@ -14,9 +14,20 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox  # noqa: E402
 
 
+def shot(color, size=(800, 500)) -> Image.Image:
+    """Screenshot tiruan berisi teks & kotak (bukan satu warna polos: itu ditolak sebagai layar kosong)."""
+    from PIL import ImageDraw
+    img = Image.new("RGB", size, color)
+    d = ImageDraw.Draw(img)
+    d.rectangle([10, 10, size[0] // 2, 40], fill="white")
+    d.text((14, 18), f"Soal {color}", fill="black")
+    d.rectangle([10, size[1] - 40, size[0] - 10, size[1] - 12], outline="black", width=2)
+    return img
+
+
 def png_bytes(color, size=(800, 500)):
     buf = io.BytesIO()
-    Image.new("RGB", size, color).save(buf, format="PNG")
+    shot(color, size).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -88,7 +99,7 @@ def test_claude_workflow(win, tmp_path, monkeypatch):
     assert w.spin.value() == 1
     (shots / "Screenshot 2026-11-19 100003.jpg").write_bytes(b"")  # file kosong dulu
     time.sleep(0.2)
-    Image.new("RGB", (600, 400), "green").save(shots / "Screenshot 2026-11-19 100003.jpg", "JPEG")
+    shot("green", (600, 400)).save(shots / "Screenshot 2026-11-19 100003.jpg", "JPEG")
     assert wait_until(lambda: len(w.pkg.items) == 3)
     assert names(w) == ["TIU-001.png", "TWK-001.png", "TWK-002.png"]
     w.select_category("TWK")
@@ -114,7 +125,7 @@ def test_claude_workflow(win, tmp_path, monkeypatch):
     w.set_number(10)
     w.arm()
     (shots / "tkp.webp").write_bytes(b"")
-    Image.new("RGB", (300, 300), "purple").save(shots / "tkp.webp", "WEBP")
+    shot("purple", (300, 300)).save(shots / "tkp.webp", "WEBP")
     assert wait_until(lambda: w.pkg.find_slot("TKP", 10) is not None)
     assert not w.armed and w.spin.value() == 10
 
@@ -161,7 +172,7 @@ def test_refresh_and_manual_pick(win, monkeypatch):
     assert names(w) == ["TWK-001.png"]
 
     other = shots.parent / "lain.jpg"
-    Image.new("RGB", (50, 50), "pink").save(other, "JPEG")
+    shot("pink", (120, 90)).save(other, "JPEG")
     monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([str(other)], ""))
     w.pick_files()
     assert names(w) == ["TWK-001.png", "TWK-002.png"]
@@ -380,8 +391,11 @@ def test_export_warnings_and_ready_to_import(win, tmp_path, monkeypatch):
     w.arm()
     make_alfaiz_question(1, "figural")[0].save(shots / "a.png")
     assert wait_until(lambda: w.pkg.find_slot("TIU", 1) is not None)
-    _Image.new("RGB", (800, 600), "black").save(shots / "b.png")        # screenshot hitam
-    assert wait_until(lambda: w.pkg.find_slot("TIU", 2) is not None)
+    _Image.new("RGB", (800, 600), "black").save(shots / "b.png")        # screenshot hitam: ditolak saat masuk
+    assert wait_until(lambda: "kosong/hitam" in w.banner.text())
+    assert w.pkg.find_slot("TIU", 2) is None
+    _Image.new("RGB", (800, 600), "black").save(tmp_path / "hitam.png")  # yang lolos lewat jalur lain ...
+    w.pkg.add_image(tmp_path / "hitam.png", "TIU", 2)                   # ... tetap diperingatkan saat ekspor
     # TIU 3 tidak ada -> nomor hilang
     warned = []
 
