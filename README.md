@@ -74,6 +74,14 @@ terpotong), soal diambil ulang lebih hati-hati, dan bila tetap kurang dicatat di
 membuat aplikasi menunggu sampai batas waktu. Screenshot manual yang kosong/hitam ditolak, dan
 peringatan ekspor hanya menyebut soal yang pilihannya 1–3 (terpotong).
 
+**Zoom browser / skala Windows (scroll pecahan piksel):** bila 1 notch scroll bukan bilangan bulat
+(mis. 83,75 px pada zoom 125%), huruf digambar ulang sedikit berbeda tiap posisi. Penyambungan
+memakai pencocokan sub-piksel yang dibatasi jarak scroll yang mungkin (notch × px/notch), jadi area
+kosong tidak pernah salah dicocokkan — isi tidak tergandakan dan pembahasan tidak terpotong.
+Kalibrasi diperhalus di setiap langkah; bila kalibrasi gagal dipakai langkah kecil yang aman.
+Kesalahan tak terduga pada satu soal tidak menghentikan proses: soal itu dibuka & diambil ulang,
+dan bila tetap gagal dicatat di laporan lalu dilanjutkan ke soal berikutnya.
+
 Area potong selalu pas di tepi kartu soal. Jika ada tulisan yang menyentuh tepi (tanda terpotong),
 area otomatis diperlebar sampai ruang kosong, soal itu diambil ulang, dan area baru disimpan.
 

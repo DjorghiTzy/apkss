@@ -33,6 +33,7 @@ UNASSIGNED_DIR = "_belum"
 REPLACED_DIR = "_diganti"
 PARTS_DIR = "_bagian"
 MIN_OVERLAP_ROWS = 12
+OVERLAP_KEY = "sm_overlap"           # Image.info: tumpang tindih dengan bagian sebelumnya
 STATE_FILE = "paket.json"
 STATE_VERSION = 1
 
@@ -170,20 +171,86 @@ def _row_hashes(img: Image.Image) -> list[int]:
     return [hash(data[i * stride:(i + 1) * stride]) for i in range(rgb.height)]
 
 
-def find_overlap(top: Image.Image, bottom: Image.Image, min_rows: int = MIN_OVERLAP_ROWS) -> int:
+def find_overlap(top: Image.Image, bottom: Image.Image, min_rows: int = MIN_OVERLAP_ROWS,
+                 max_shift: Optional[int] = None) -> int:
     """Jumlah baris di bawah `top` yang sama dengan baris teratas `bottom`
     (terjadi saat halaman di-scroll kurang dari satu layar). 0 jika tidak ada.
 
     Coba pencocokan persis dulu; jika gagal (mis. browser di-zoom sehingga
     hasil render bergeser sub-piksel), pakai pencocokan toleran.
+
+    `max_shift`: pergeseran terbesar yang MUNGKIN (jumlah notch × px per notch). Tumpang tindih yang
+    lebih kecil dari itu mustahil, jadi tidak dicari — mencegah cocok palsu di area kosong
+    (yang dulu membuat isi tergandakan dan soal berikutnya terpotong).
     """
     if top.width != bottom.width:
         return 0
+    h = min(top.height, bottom.height)
+    lo = min_rows if not max_shift else max(min_rows, h - int(max_shift))
+    if lo >= h:
+        return 0
     ra, rb = _row_hashes(top), _row_hashes(bottom)
-    for k in range(min(len(ra), len(rb)) - 1, min_rows - 1, -1):
+    for k in range(h - 1, lo - 1, -1):
         if ra[-k] == rb[0] and ra[-1] == rb[k - 1] and ra[-k:] == rb[:k]:
             return k
-    return _fuzzy_overlap(top, bottom, min_rows)
+    k = _fuzzy_overlap(top, bottom, lo)
+    return k if k else _subpixel_overlap(top, bottom, lo)
+
+
+def _subpixel_overlap(top: Image.Image, bottom: Image.Image, min_rows: int,
+                      max_score: float = 4.0) -> int:
+    """Tumpang tindih untuk scroll PECAHAN piksel (zoom browser + skala Windows): huruf digambar
+    ulang sedikit berbeda, jadi yang dibandingkan rata-rata blok per baris (dihaluskan 3 baris).
+
+    Dipilih pergeseran dengan selisih terkecil; bila beberapa hampir sama (area kosong), dipilih
+    tumpang tindih TERBESAR — yang dibuang hanya baris kosong, isi tidak pernah hilang."""
+    import numpy as np
+
+    a = np.asarray(top.convert("L"), dtype=np.float32)
+    b = np.asarray(bottom.convert("L"), dtype=np.float32)
+    h = min(a.shape[0], b.shape[0])
+    w = a.shape[1]
+    if h <= min_rows or w < 8:
+        return 0
+    blocks = max(1, min(24, w // 16))
+    bw = w // blocks
+
+    def sig(m):
+        s_ = m[:, :blocks * bw].reshape(m.shape[0], blocks, bw).mean(axis=2)
+        out = s_.copy()
+        out[1:-1] = (s_[:-2] + s_[1:-1] + s_[2:]) / 3.0
+        return out
+    sa, sb = sig(a), sig(b)
+    ks = np.arange(min_rows, h)
+    scores = np.array([np.abs(sa[-k:] - sb[:k]).mean() for k in ks])
+    best = float(scores.min())
+    if best > max_score:
+        return 0
+    near = ks[scores <= best + 0.15]
+    k = int(near.max())
+    # isi area tumpang tindih harus benar-benar cocok (bukan kebetulan pada area kosong)
+    region = sb[:k]
+    if len(ks) >= 10 and region.std() >= 2.0 and best > 0.5 * float(np.median(scores)):
+        return 0
+    if _envelope_bad(a[-k:], b[:k]) > 0.10:
+        return 0                                   # rata-rata blok mirip, tapi pikselnya halaman lain
+    return k
+
+
+def _envelope_bad(A, B, tol: int = 40) -> float:
+    """Bagian piksel bertinta di B yang TIDAK berada di antara nilai baris tetangganya di A.
+
+    Pada scroll pecahan, tiap piksel baru = campuran baris di sekitarnya, jadi nilainya selalu di
+    rentang min..max baris atas/tengah/bawah (±tol). Halaman lain yang tata letaknya mirip melanggar
+    ini di banyak tempat (≈25%), tumpang tindih asli hanya sedikit (≤ 4%)."""
+    import numpy as np
+    up = np.vstack([A[:1], A[:-1]])
+    dn = np.vstack([A[1:], A[-1:]])
+    lo = np.minimum(np.minimum(A, up), dn) - tol
+    hi = np.maximum(np.maximum(A, up), dn) + tol
+    bad = int(((B < lo) | (B > hi)).sum())
+    ink = int((np.minimum(A, B) < 200).sum())
+    return bad / max(1, ink) if ink else 0.0
 
 
 def _fuzzy_overlap(top: Image.Image, bottom: Image.Image, min_rows: int,
@@ -214,7 +281,10 @@ def stitch(parts: list[Image.Image]) -> tuple[Image.Image, list[int]]:
     overlaps = [0]
     crops = [parts[0]]
     for prev, cur in zip(parts, parts[1:]):
-        k = find_overlap(prev, cur)
+        # Tangkap Otomatis sudah menghitung tumpang tindih dengan batas pergeseran scroll: pakai itu
+        k = cur.info.get(OVERLAP_KEY)
+        if k is None:
+            k = find_overlap(prev, cur)
         overlaps.append(k)
         crops.append(cur.crop((0, k, cur.width, cur.height)) if k else cur)
     width = max(c.width for c in crops)

@@ -148,7 +148,8 @@ class FakeAlfaiz:
     def __init__(self, counts, height_of=lambda cat, n: 900 + (n * 173) % 1500, start_cat="TWK",
                  px_per_notch=53, dy_extra=None, load_s=0.0, anim_s=0.0, full_text=False,
                  card_border=False, sidebar_border=True, page_maker=None, black_after_nav=None,
-                 scroll_lag=None, blink=False, scrolling_header=False):
+                 scroll_lag=None, blink=False, scrolling_header=False, subpixel=False):
+        self.subpixel = subpixel                       # scroll pecahan piksel (zoom + skala Windows)
         self.scrolling_header = scrolling_header       # header merah selebar layar yang ikut ter-scroll
         self.counts = counts
         self.black_after_nav = black_after_nav or {}   # (kat, n) -> detik layar hitam setelah dibuka
@@ -194,7 +195,16 @@ class FakeAlfaiz:
             page = self.pages[getattr(self, "_prev_page", (self.cat, self.n))]
         else:
             page = self.pages[(self.cat, self.n)]
-        part = page.crop((0, sy, w, min(page.height, sy + h)))
+        if self.subpixel and sy != int(sy):            # huruf digambar ulang di posisi sub-piksel
+            import math
+            base = int(math.floor(sy))
+            frac = sy - base
+            chunk = page.crop((0, base, w, min(page.height, base + h + 1)))
+            part = chunk.transform(chunk.size, Image.AFFINE, (1, 0, 0, 0, 1, frac), resample=Image.BILINEAR)
+            part = part.crop((0, 0, w, min(h, chunk.height - 1)))
+        else:
+            sy = int(sy)
+            part = page.crop((0, sy, w, min(page.height, sy + h)))
         scr.paste(part, (x, y))
         if self.scrolling_header and sy < 40:                          # header ikut ter-scroll (tidak menempel)
             d.rectangle([0, y, W, y + 39 - sy], fill=(147, 0, 18))
@@ -273,6 +283,8 @@ class FakeAlfaiz:
         page = self.pages[(self.cat, self.n)]
         max_y = max(0, page.height - self.CONTENT[3])
         new = min(max_y, max(0, self.scroll_y - notches * self.px))
+        if not self.subpixel:
+            new = int(new)
         lag = self.scroll_lag.get((self.cat, self.n), 0)
         if lag and notches < 0 and new != self.scroll_y:              # browser telat merespons
             self._pending = (_t.monotonic() + lag, new)

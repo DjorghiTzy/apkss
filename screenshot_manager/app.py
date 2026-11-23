@@ -14,7 +14,7 @@ from PIL import Image
 from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPen,
                            QKeySequence, QPixmap)
-from PySide6.QtWidgets import (QMenu, QPlainTextEdit, QProgressDialog, QDoubleSpinBox, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
+from PySide6.QtWidgets import (QPlainTextEdit, QProgressDialog, QDoubleSpinBox, QAbstractItemView, QApplication, QButtonGroup, QComboBox,
                                QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
                                QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -689,6 +689,7 @@ class AutoWorker(QObject):
             try:
                 self.finished.emit(runner.run())
             except Exception as exc:  # noqa: BLE001
+                log.error("Tangkap Otomatis gagal:\n%s", traceback.format_exc())
                 self.failed.emit(f"{type(exc).__name__}: {exc}")
         threading.Thread(target=run, daemon=True).start()
 
@@ -1455,7 +1456,7 @@ class MainWindow(QMainWindow):
         item = res.item
         self.last_item_id = item.id
         if item.assigned:
-            replaced = f" (menggantikan versi lama)" if res.replaced else ""
+            replaced = " (menggantikan versi lama)" if res.replaced else ""
             msg = f"✔ DITERIMA: {item.filename}{replaced}{' (dipotong)' if res.cropped else ''}  ←  {name}"
             if self.redo_restore:
                 cat, num = self.redo_restore
@@ -1844,7 +1845,9 @@ class MainWindow(QMainWindow):
         self._thumbs.clear()
         self.refresh_table()
         if rep is None:
-            self.error(f"Tangkap Otomatis berhenti karena kesalahan: {crash}")
+            self.error(f"Tangkap Otomatis berhenti karena kesalahan: {crash}\n\n"
+                       "Soal yang sudah diambil tetap tersimpan. Tekan F10 lagi untuk melanjutkan "
+                       "(soal yang sudah ada dilewati).")
             return
         if rep.crop:                                   # area diperlebar agar tidak terpotong: simpan
             self.settings["crop"] = dict(rep.crop)

@@ -20,7 +20,8 @@ from typing import Callable, Optional, Protocol
 
 from PIL import Image
 
-from .core import DuplicateImageError, ManagerError, Package, apply_crop, find_overlap, stitch
+from .core import (OVERLAP_KEY, DuplicateImageError, ManagerError, Package, apply_crop, find_overlap,
+                   stitch)
 
 SCROLL_TOP_NOTCHES = 60
 
@@ -583,17 +584,24 @@ class AutoCapture:
                 return parts, gap, True                    # tidak bergeser lagi: sudah paling bawah
             self._note_latency()
             self._at_top = False
-            k = find_overlap(last, cur)
+            # pergeseran tidak mungkin melebihi notch × px/notch (+ toleransi pembulatan & zoom)
+            expect = notches * self.px_per_notch if self.px_per_notch else None
+            max_shift = int(expect * 1.06 + 3) if expect else None
+            k = find_overlap(last, cur, max_shift=max_shift)
             if k == 0:
+                cur.info[OVERLAP_KEY] = 0                  # celah: jangan ditebak ulang saat menyambung
                 parts.append(cur)
                 return parts, True, False
+            cur.info[OVERLAP_KEY] = k                      # dipakai lagi saat menyambung (stitch)
             shift = h - k
             parts.append(cur)
             if self.px_per_notch is None:
                 self.px_per_notch = shift / notches
-            if shift > self.step_px:
-                self.step_px = shift
-            elif shift < 0.9 * self.step_px:
+                continue
+            if expect and shift >= 0.94 * expect:          # langkah penuh: perhalus kalibrasi (px pecahan)
+                self.px_per_notch = shift / notches
+                self.step_px = max(self.step_px, shift) if shift <= max_shift else self.step_px
+            elif expect:
                 return parts, gap, True                    # pergeseran terpotong: dasar halaman
         return parts, gap, True
 
@@ -610,13 +618,17 @@ class AutoCapture:
                     parts += more[1:]
             elif not gap:
                 return parts                               # halaman tidak bisa di-scroll
+            else:
+                self.notches = 2                           # kalibrasi gagal: langkah kecil yang aman
+                self.progress("  kalibrasi scroll tidak pasti — memakai langkah kecil (2 notch)")
         else:
             parts, gap, _ = self._scroll_parts(first, self.notches)
         tries = 0
         while gap and tries < 2:                           # ada bagian terlewat: ulangi, langkah lebih kecil
             tries += 1
-            self.notches = max(1, int(self.notches * 0.6))
+            self.notches = max(1, int((self.notches or 2) * 0.6))
             self.step_px = 0
+            self.px_per_notch = None                       # kalibrasi mungkin salah: ukur ulang
             rep.problems.append((name, f"langkah scroll terlalu besar, diulang ({self.notches} notch)"))
             self._at_top = False
             self._scroll_top()
@@ -729,6 +741,26 @@ class AutoCapture:
                 rep.problems.append((name, f"hanya {rows} baris pilihan terlihat (A–E tidak lengkap?) — periksa"))
         return parts
 
+    def _take(self, cat, local, g, name, rep, first_of_run):
+        """Satu soal lengkap: buka, scroll sampai akhir pembahasan, perlebar bila terpotong, cek kualitas."""
+        first = self._open_question(cat, local, g, first_of_run)
+        t_loaded = time.monotonic()
+        parts = self._capture_question(first, name, rep)
+        for _ in range(2):                                 # tulisan menyentuh tepi -> lebarkan & ulangi
+            edges = [self._edge_ink(p) for p in parts]
+            lft, rgt = any(e[0] for e in edges), any(e[1] for e in edges)
+            if not (lft or rgt) or self._edge_unfixable:
+                break
+            if not self._widen(lft, rgt):
+                self._edge_unfixable = True
+                rep.problems.append((name, "tulisan menyentuh tepi area — mungkin terpotong"))
+                break
+            rep.crop = dict(self.cfg.crop)
+            self._at_top = False
+            self._scroll_top()
+            parts = self._capture_question(self._stable(), name, rep)
+        return self._quality_gate(parts, cat, local, g, name, rep), t_loaded
+
     def run(self) -> Report:
         rep = Report()
         t_start = time.monotonic()
@@ -756,24 +788,22 @@ class AutoCapture:
                     rep.done.append(f"{name}.png")
                     continue
                 t_q = time.monotonic()
-                first = self._open_question(cat, local, g, not started)
-                t_loaded = time.monotonic()
+                try:
+                    parts, t_loaded = self._take(cat, local, g, name, rep, not started)
+                except (StopRequested, AutoCaptureError):
+                    raise
+                except Exception as exc:  # noqa: BLE001 - satu soal bermasalah tidak menghentikan semua
+                    self.progress(f"  {name}: kesalahan tak terduga ({type(exc).__name__}: {exc}) — dicoba ulang")
+                    try:
+                        self._at_top, self._shown_cat, self._prev_first = False, None, None
+                        parts, t_loaded = self._take(cat, local, g, name, rep, False)
+                    except (StopRequested, AutoCaptureError):
+                        raise
+                    except Exception as exc2:  # noqa: BLE001
+                        rep.problems.append((name, f"dilewati karena kesalahan: {type(exc2).__name__}: {exc2}"))
+                        self._at_top, self._shown_cat, self._prev_first = False, None, None
+                        continue
                 started = True
-                parts = self._capture_question(first, name, rep)
-                for _ in range(2):                         # tulisan menyentuh tepi -> lebarkan & ulangi
-                    edges = [self._edge_ink(p) for p in parts]
-                    lft, rgt = any(e[0] for e in edges), any(e[1] for e in edges)
-                    if not (lft or rgt) or self._edge_unfixable:
-                        break
-                    if not self._widen(lft, rgt):
-                        self._edge_unfixable = True
-                        rep.problems.append((name, "tulisan menyentuh tepi area — mungkin terpotong"))
-                        break
-                    rep.crop = dict(self.cfg.crop)
-                    self._at_top = False
-                    self._scroll_top()
-                    parts = self._capture_question(self._stable(), name, rep)
-                parts = self._quality_gate(parts, cat, local, g, name, rep)
                 t_scrolled = time.monotonic()
                 self._at_top = len(parts) == 1
                 fp = image_fingerprint(parts[0])

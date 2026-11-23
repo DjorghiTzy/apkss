@@ -480,8 +480,8 @@ def run_autosetup(driver, categories: list[str], progress: Callable[[str], None]
     box = (rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3])
     k1 = find_overlap(top.crop(box), moved.crop(box))
     k2 = find_overlap(moved.crop(box), moved2.crop(box))
-    if k1 and k2 and k1 == k2:                     # dua langkah sama panjang = belum mentok di dasar
-        crop["px_per_notch"] = round((rect[3] - k1) / 4, 3)
+    if k1 and k2 and abs(k1 - k2) <= 2:            # dua langkah sama panjang = belum mentok di dasar
+        crop["px_per_notch"] = round((rect[3] - (k1 + k2) / 2) / 4, 3)
     gbox = (int(grid.bbox[0]), int(grid.bbox[1]), int(grid.bbox[2]), int(grid.bbox[3]))
     crop["sticky"] = top.crop(gbox).tobytes() == moved.crop(gbox).tobytes()
     crop["smooth_scroll"] = bool(smooth)
